@@ -11,7 +11,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import forge.LobbyPlayer;
-import forge.ai.GameState;
+import forge.game.GameState;
 import forge.deck.CardPool;
 import forge.game.GameEntityView;
 import forge.game.card.CardView;
