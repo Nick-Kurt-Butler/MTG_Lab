@@ -55,8 +55,11 @@ fi
 echo "==> Installing engine modules to local Maven repo (slow part)…"
 # Build only forge-ai + forge-gui (and their deps: forge-core, forge-game) via
 # -pl/-am, so the desktop/mobile GUIs are never compiled. Run from the clone dir
-# so Forge's relative --settings path works.
-( cd "$TMP/forge" && mvn -q -pl forge-ai,forge-gui -am install -DskipTests )
+# so Forge's relative --settings path works. We invoke flatten:flatten before
+# install because Forge binds flatten to the `deploy` phase — without it, the
+# installed POMs keep Maven CI-friendly `${revision}` placeholders that external
+# projects (our bridge) can't resolve.
+( cd "$TMP/forge" && mvn -q -pl forge-ai,forge-gui -am flatten:flatten install -DskipTests )
 
 echo "==> Refreshing $ENGINE (engine sources + card data for runtime)…"
 mkdir -p "$ENGINE"
