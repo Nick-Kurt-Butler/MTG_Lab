@@ -67,7 +67,12 @@ for part in "${ENGINE_PARTS[@]}"; do
 done
 
 echo "==> Rebuilding bridge.jar…"
-mvn -q -f "$BRIDGE/pom.xml" clean package
+# Forge uses Maven "CI-friendly" versions (${revision}); its installed POMs may
+# reference the parent as forge:forge:${revision}. Define that property so the
+# bridge can resolve the forge-* artifacts we just installed.
+REV_ARG=()
+[[ -n "$FORGE_VER" ]] && REV_ARG=(-Drevision="$FORGE_VER")
+mvn -q -f "$BRIDGE/pom.xml" "${REV_ARG[@]}" clean package
 
 echo "==> Done. Engine updated to $FORGE_VER and bridge rebuilt."
 echo "    Relaunch the app to use it. Your UI/app code and saved decks are untouched."
