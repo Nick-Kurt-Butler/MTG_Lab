@@ -11,7 +11,8 @@ installers/
 
 # Vendored Forge engine — large and reproducible. Fetch it with
 # ./scripts/update-engine.sh (CI does this automatically). Not committed.
-engine/
+# Leading slash anchors this to the repo root so it does NOT match app/src/engine.
+/engine/
 
 # Local dev probes / scratch
 _probe/
