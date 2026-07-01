@@ -38,27 +38,30 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-echo "==> Cloning $REPO_URL ($REF), engine modules only…"
-git clone --depth 1 --branch "$REF" --filter=blob:none --sparse "$REPO_URL" "$TMP/forge"
-git -C "$TMP/forge" sparse-checkout set "${ENGINE_PARTS[@]}"
-
-echo "==> Refreshing $ENGINE"
-mkdir -p "$ENGINE"
-for part in "${ENGINE_PARTS[@]}"; do
-  if [[ -e "$TMP/forge/$part" ]]; then
-    rsync -a --delete "$TMP/forge/$part" "$ENGINE/"
-  fi
-done
+echo "==> Cloning $REPO_URL ($REF)…"
+# Full shallow clone (not sparse): Maven's reactor needs every module the root
+# pom lists to exist, even though we only compile the engine ones below.
+git clone --depth 1 --branch "$REF" "$REPO_URL" "$TMP/forge"
 
 # Sync the bridge's compile-time Forge version to whatever upstream now is.
-FORGE_VER="$(mvn -q -f "$ENGINE/pom.xml" help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -1 || true)"
+FORGE_VER="$(mvn -q -f "$TMP/forge/pom.xml" help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -1 || true)"
 if [[ -n "$FORGE_VER" ]]; then
   echo "==> Forge version: $FORGE_VER  → syncing bridge/pom.xml"
   perl -0pi -e "s|(<forge\.version>)[^<]*(</forge\.version>)|\${1}$FORGE_VER\${2}|" "$BRIDGE/pom.xml"
 fi
 
 echo "==> Installing engine modules to local Maven repo (slow part)…"
-mvn -q -f "$ENGINE/pom.xml" -pl forge-ai,forge-gui -am install -DskipTests
+# Build only forge-ai + forge-gui (and their deps: forge-core, forge-game) via
+# -pl/-am, so the desktop/mobile GUIs are never compiled.
+mvn -q -f "$TMP/forge/pom.xml" -pl forge-ai,forge-gui -am install -DskipTests
+
+echo "==> Refreshing $ENGINE (engine sources + card data for runtime)…"
+mkdir -p "$ENGINE"
+for part in "${ENGINE_PARTS[@]}"; do
+  if [[ -e "$TMP/forge/$part" ]]; then
+    rsync -a --delete "$TMP/forge/$part" "$ENGINE/"
+  fi
+done
 
 echo "==> Rebuilding bridge.jar…"
 mvn -q -f "$BRIDGE/pom.xml" clean package
