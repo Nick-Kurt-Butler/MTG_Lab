@@ -43,8 +43,10 @@ echo "==> Cloning $REPO_URL ($REF)…"
 # pom lists to exist, even though we only compile the engine ones below.
 git clone --depth 1 --branch "$REF" "$REPO_URL" "$TMP/forge"
 
-# Sync the bridge's compile-time Forge version to whatever upstream now is.
-FORGE_VER="$(mvn -q -f "$TMP/forge/pom.xml" help:evaluate -Dexpression=project.version -DforceStdout 2>/dev/null | tail -1 || true)"
+# Sync the bridge's compile-time Forge version to whatever upstream now is. Run
+# from inside the clone so Forge's .mvn/maven.config (which points --settings at
+# a repo-relative ./.mvn/local-settings.xml) resolves correctly.
+FORGE_VER="$( (cd "$TMP/forge" && mvn -q help:evaluate -Dexpression=project.version -DforceStdout) 2>/dev/null | tail -1 || true)"
 if [[ -n "$FORGE_VER" ]]; then
   echo "==> Forge version: $FORGE_VER  → syncing bridge/pom.xml"
   perl -0pi -e "s|(<forge\.version>)[^<]*(</forge\.version>)|\${1}$FORGE_VER\${2}|" "$BRIDGE/pom.xml"
@@ -52,8 +54,9 @@ fi
 
 echo "==> Installing engine modules to local Maven repo (slow part)…"
 # Build only forge-ai + forge-gui (and their deps: forge-core, forge-game) via
-# -pl/-am, so the desktop/mobile GUIs are never compiled.
-mvn -q -f "$TMP/forge/pom.xml" -pl forge-ai,forge-gui -am install -DskipTests
+# -pl/-am, so the desktop/mobile GUIs are never compiled. Run from the clone dir
+# so Forge's relative --settings path works.
+( cd "$TMP/forge" && mvn -q -pl forge-ai,forge-gui -am install -DskipTests )
 
 echo "==> Refreshing $ENGINE (engine sources + card data for runtime)…"
 mkdir -p "$ENGINE"
