@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output / staging
+app/dist/
+app/build/
+bridge/target/
+bridge/dependency-reduced-pom.xml
+release/
+installers/
+
+# Vendored Forge engine — large and reproducible. Fetch it with
+# ./scripts/update-engine.sh (CI does this automatically). Not committed.
+engine/
+
+# Local dev probes / scratch
+_probe/
+spectator/
+
+# OS / editor noise
+.DS_Store
+*.log

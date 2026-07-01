@@ -1,0 +1,21 @@
+{
+  "Mono Red Starter": {
+    "Mountain": 24,
+    "Goblin Piker": 12,
+    "Goblin Arsonist": 4,
+    "Forge Devil": 4,
+    "Bogardan Firefiend": 4,
+    "Mudbutton Torchrunner": 4,
+    "Harried Spearguard": 4,
+    "Sparkmage Apprentice": 4
+  },
+  "Mono Green Starter": {
+    "Forest": 24,
+    "Grizzly Bears": 16,
+    "Elvish Visionary": 4,
+    "Scute Swarm": 4,
+    "Jaddi Offshoot": 4,
+    "Kazandu Nectarpot": 4,
+    "Vinelasher Kudzu": 4
+  }
+}

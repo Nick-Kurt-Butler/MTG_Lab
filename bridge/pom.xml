@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>mtgforgelab</groupId>
+  <artifactId>bridge</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Must match the Forge you `mvn install`ed from ../engine/forge
+         (pom.xml: versionCode 2.0.13 + snapshotName -SNAPSHOT). The
+         update-engine.sh script keeps this in sync automatically. -->
+    <forge.version>2.0.13-SNAPSHOT</forge.version>
+  </properties>
+
+  <dependencies>
+    <!-- forge-gui pulls forge-game / forge-core transitively; forge-ai gives us
+         the AI PlayerController for unimplemented decisions + spectator mode. -->
+    <dependency>
+      <groupId>forge</groupId>
+      <artifactId>forge-gui</artifactId>
+      <version>${forge.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>forge</groupId>
+      <artifactId>forge-ai</artifactId>
+      <version>${forge.version}</version>
+    </dependency>
+    <!-- Lightweight embedded WebSocket server (our own local/WLAN transport;
+         we deliberately do NOT use Forge's netty networking). -->
+    <dependency>
+      <groupId>org.java-websocket</groupId>
+      <artifactId>Java-WebSocket</artifactId>
+      <version>1.5.7</version>
+    </dependency>
+    <!-- JSON parsing for inbound client responses (Forge already uses Gson). -->
+    <dependency>
+      <groupId>com.google.code.gson</groupId>
+      <artifactId>gson</artifactId>
+      <version>2.10.1</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>bridge</finalName>
+    <plugins>
+      <!-- Build a runnable uber-jar so Electron can spawn `java -jar bridge.jar`. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>mtgforgelab.bridge.BridgeMain</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,103 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body {
+  background: #06060a;
+  color: #d4cabb;
+  font-family: 'Crimson Text', Georgia, serif;
+}
+h1, h2, h3 { font-family: 'Cinzel', serif; color: #d4a843; font-weight: 500; }
+
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 8px 16px; border-bottom: 1px solid rgba(40,40,60,0.6);
+  background: linear-gradient(180deg, rgba(14,14,22,0.95), rgba(8,8,14,0.95));
+  font-size: 14px;
+}
+.topbar .turn { color: #d4a843; letter-spacing: 1px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.on { background: #4caf50; box-shadow: 0 0 8px #4caf50; }
+.dot.off { background: #b03030; }
+
+.board { flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.seat {
+  border: 1px solid rgba(40,40,60,0.5); border-radius: 10px; padding: 10px;
+  background: rgba(12,12,20,0.6);
+}
+.seat.active { border-color: rgba(184,144,48,0.5); box-shadow: 0 0 18px rgba(120,90,20,0.15); }
+.seat-head { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; font-size: 14px; }
+.seat-head .name { font-family: 'Cinzel', serif; color: #d4a843; }
+.life { font-size: 20px; color: #e6dcc8; font-weight: 600; }
+.pill { font-size: 12px; color: #9a907e; border: 1px solid rgba(60,60,80,0.5); border-radius: 10px; padding: 1px 8px; }
+
+.zone-label { font-size: 11px; letter-spacing: 1px; color: #7a7060; margin: 6px 0 3px; text-transform: uppercase; }
+.cards { display: flex; flex-wrap: wrap; gap: 6px; min-height: 86px; }
+
+.card {
+  width: 62px; height: 86px; border-radius: 6px; padding: 5px;
+  background: linear-gradient(160deg, #1a1626, #0e0c16);
+  border: 1px solid rgba(80,70,110,0.5);
+  font-size: 9px; color: #cfc6df; position: relative;
+  display: flex; flex-direction: column; justify-content: space-between;
+  cursor: default; user-select: none;
+}
+.card.tapped { transform: rotate(12deg); opacity: 0.85; }
+.card.sick { filter: saturate(0.6); }
+.card .nm { line-height: 1.05; overflow: hidden; }
+.card .pt { align-self: flex-end; font-weight: 700; color: #e6dcc8; font-size: 11px; }
+.card .back { background: repeating-linear-gradient(45deg,#181426,#181426 4px,#120f1e 4px,#120f1e 8px); }
+.card.selectable { cursor: pointer; border-color: rgba(184,144,48,0.7); }
+.card.selected { outline: 2px solid #d4a843; }
+
+.cardback {
+  width: 62px; height: 86px; border-radius: 6px;
+  background: repeating-linear-gradient(45deg,#181426,#181426 5px,#120f1e 5px,#120f1e 10px);
+  border: 1px solid rgba(80,70,110,0.4);
+}
+
+.panel {
+  border-top: 1px solid rgba(40,40,60,0.6);
+  background: linear-gradient(0deg, rgba(14,14,22,0.97), rgba(10,10,16,0.97));
+  padding: 12px 16px; min-height: 70px;
+}
+.panel .prompt { font-family: 'Cinzel', serif; color: #d4a843; margin-bottom: 8px; }
+.btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+button {
+  font-family: 'Crimson Text', serif; font-size: 14px; cursor: pointer;
+  background: linear-gradient(180deg,#2a2438,#1a1626); color: #d4cabb;
+  border: 1px solid rgba(120,100,160,0.4); border-radius: 6px; padding: 6px 14px;
+  transition: all 0.15s ease;
+}
+button:hover { border-color: rgba(184,144,48,0.7); color: #f0e6d2; }
+button.primary { background: linear-gradient(180deg,#5a3a1a,#3a2410); border-color: rgba(184,144,48,0.6); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.center { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; flex: 1; }
+.center input { font-size: 14px; padding: 6px 10px; background: #12101c; color: #d4cabb; border: 1px solid rgba(120,100,160,0.4); border-radius: 6px; }
+.stack-line { font-size: 12px; color: #c0b6a0; }
+.log { font-size: 12px; color: #8a8070; }
+
+.home-bg {
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 44px;
+  padding: 40px;
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(80,30,30,0.08) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, transparent 30%, rgba(0,0,0,0.5) 100%),
+    #06060a;
+}
+.home-card {
+  width: 240px; padding: 30px 22px; border-radius: 12px; cursor: pointer; text-align: center;
+  background: linear-gradient(135deg, rgba(12,12,20,0.95), rgba(8,8,14,0.98));
+  border: 1px solid rgba(30,30,48,0.6);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  transition: all 0.25s ease;
+}
+.home-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(184,144,48,0.4);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.8), 0 0 30px rgba(80,20,20,0.1);
+}

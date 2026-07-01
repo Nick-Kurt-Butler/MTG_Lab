@@ -1,0 +1,70 @@
+name: Build installers
+
+# One-click installers for macOS, Windows, and Linux. The Java side (bridge.jar
+# + Forge card data) is platform-independent, so we build the engine ONCE, then
+# package per-OS with a matching bundled Temurin JRE — no Java needed by players.
+#
+# Trigger: push a version tag (v*) or run manually.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ── Build the platform-independent Java engine + bridge once. ──────────────
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - name: Build Forge engine + bridge.jar
+        run: ./scripts/update-engine.sh
+      - name: Collect Java artifacts
+        run: |
+          mkdir -p out
+          cp bridge/target/bridge.jar out/
+          tar -czf out/forge-gui.tgz -C engine/forge forge-gui
+      - uses: actions/upload-artifact@v4
+        with: { name: java-engine, path: out/, retention-days: 5 }
+
+  # ── Package a one-click installer on each OS. ──────────────────────────────
+  package:
+    needs: engine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,   name: macOS }
+          - { os: windows-latest, name: Windows }
+          - { os: ubuntu-latest,  name: Linux }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run: { shell: bash }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: java-engine, path: out }
+      - name: Restore Java artifacts into the tree
+        run: |
+          mkdir -p bridge/target engine/forge
+          cp out/bridge.jar bridge/target/bridge.jar
+          tar -xzf out/forge-gui.tgz -C engine/forge
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      # A Temurin JRE to bundle into the app (so players need no Java).
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', java-package: jre }
+      - name: Install app deps
+        run: cd app && npm ci
+      - name: Build installer
+        run: ./scripts/build-app.sh --with-jre "$JAVA_HOME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MTG-Lab-${{ matrix.name }}
+          path: |
+            release/*.pkg
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+          retention-days: 14
