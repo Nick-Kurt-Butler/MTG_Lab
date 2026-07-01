@@ -12,8 +12,8 @@
 #   MTG_Lab/engine/forge/   ← engine modules (kept in sync with upstream)
 #
 # Usage:
-#   ./scripts/update-engine.sh            # fetch upstream master, refresh engine, rebuild
-#   FORGE_REF=v2.0.14 ./scripts/update-engine.sh   # pin a tag/branch
+#   ./scripts/update-engine.sh            # fetch the pinned Forge release, refresh engine, rebuild
+#   FORGE_REF=master ./scripts/update-engine.sh    # override the ref (branch/tag)
 #
 # Requirements: git, rsync, Maven, JDK 21 (JAVA_HOME or on PATH). Needs network
 # access to github.com (a corporate proxy may block this — if the clone fails,
@@ -25,7 +25,10 @@ LAB="$(cd "$HERE/.." && pwd)"
 ENGINE="$LAB/engine/forge"
 BRIDGE="$LAB/bridge"
 REPO_URL="${FORGE_REPO:-https://github.com/Card-Forge/forge.git}"
-REF="${FORGE_REF:-master}"
+# Pinned to the Forge release the bridge is written against. `master` drifts
+# (e.g. forge.ai.GameState was removed after 2.0.13) and breaks the bridge, so
+# we pin. Bump this deliberately when adapting the bridge to a newer engine.
+REF="${FORGE_REF:-forge-2.0.13}"
 
 # Only these top-level dirs/files are the "engine piece" we keep.
 ENGINE_PARTS=(forge-core forge-game forge-ai forge-gui pom.xml)
