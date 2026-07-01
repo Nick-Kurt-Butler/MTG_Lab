@@ -117,7 +117,7 @@ export default function GameScreen({ wlan }) {
     deckOnWelcomeRef.current = null
     startPayloadRef.current = { type: 'control', action: 'start', mode, decks: [deckObj(yourDeck), deckObj(oppDeck)] }
     autoStartRef.current = true
-    prepConn(); setWlanRole(null); setStep('lobby'); open('ws://localhost:8088')
+    prepConn(); setWlanRole(null); setStep('lobby'); open('ws://127.0.0.1:8088')
   }
   // WLAN host: announce your deck, wait for a guest, then start (guest brings own deck).
   function hostWlan() {
@@ -125,7 +125,7 @@ export default function GameScreen({ wlan }) {
     deckOnWelcomeRef.current = deckObj(yourDeck)
     startPayloadRef.current = { type: 'control', action: 'start', mode: 'pvp', decks: [deckObj(yourDeck)] }
     autoStartRef.current = false
-    prepConn(); setWlanRole('host'); setStep('lobby'); open('ws://localhost:8088')
+    prepConn(); setWlanRole('host'); setStep('lobby'); open('ws://127.0.0.1:8088')
   }
   function hostStart() { if (startPayloadRef.current) connRef.current?.send(startPayloadRef.current) }
   // WLAN join: connect to the host, announce your deck; never sends start.

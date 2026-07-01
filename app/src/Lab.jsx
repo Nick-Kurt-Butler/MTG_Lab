@@ -72,7 +72,7 @@ export default function Lab() {
     if (!main || !opp || status === 'running' || status === 'connecting') return
     setError(''); setReport(null); setStatus('connecting')
     setProgress({ done: 0, total: n, etaMs: 0, elapsedMs: 0, wins: 0, losses: 0, draws: 0 })
-    const conn = connectBridge('ws://localhost:8088', {
+    const conn = connectBridge('ws://127.0.0.1:8088', {
       onOpen: () => {},
       onWelcome: () => {
         setStatus('running')

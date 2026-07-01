@@ -68,3 +68,19 @@ jobs:
             release/*.exe
             release/*.AppImage
           retention-days: 14
+
+  # ── Publish the three installers to a GitHub Release for the tag. ──────────
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist-installers }
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-installers/**/*
+          generate_release_notes: true
