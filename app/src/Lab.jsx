@@ -65,35 +65,62 @@ export default function Lab() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState('')
   const connRef = useRef(null)
+  const welcomedRef = useRef(false)   // connection reached the engine
+  const cancelledRef = useRef(false)  // user stopped / component unmounted
+  const retriesRef = useRef(0)
+  const simMsgRef = useRef(null)
 
-  useEffect(() => () => { connRef.current?.close() }, [])
+  useEffect(() => () => { cancelledRef.current = true; connRef.current?.close() }, [])
 
   function run() {
     if (!main || !opp || status === 'running' || status === 'connecting') return
     setError(''); setReport(null); setStatus('connecting')
     setProgress({ done: 0, total: n, etaMs: 0, elapsedMs: 0, wins: 0, losses: 0, draws: 0 })
+    simMsgRef.current = {
+      type: 'control', action: 'sim', n,
+      main: { name: main, cards: decks[main] },
+      opponent: { name: opp, cards: decks[opp] },
+    }
+    welcomedRef.current = false
+    cancelledRef.current = false
+    retriesRef.current = 0
+    connectAttempt()
+  }
+
+  // The bridge takes ~20s to load the card DB on first launch, so — like the
+  // game screen — retry the connection instead of failing on the first miss.
+  function connectAttempt() {
+    if (cancelledRef.current) return
     const conn = connectBridge('ws://127.0.0.1:8088', {
-      onOpen: () => {},
       onWelcome: () => {
+        welcomedRef.current = true
         setStatus('running')
-        conn.send({
-          type: 'control', action: 'sim', n,
-          main: { name: main, cards: decks[main] },
-          opponent: { name: opp, cards: decks[opp] },
-        })
+        conn.send(simMsgRef.current)
       },
-      onError: () => { setStatus('error'); setError('Could not reach the engine. Is the app bridge running?') },
+      onError: () => retryOrFail(),
+      onClose: () => retryOrFail(),
       onSim: msg => {
         if (msg.kind === 'progress') setProgress(msg)
-        else if (msg.kind === 'done') { setReport(msg); setStatus('done'); conn.close() }
-        else if (msg.kind === 'cancelled') { setStatus('idle'); conn.close() }
-        else if (msg.kind === 'error') { setStatus('error'); setError(msg.message || 'Simulation error'); conn.close() }
+        else if (msg.kind === 'done') { setReport(msg); setStatus('done'); cancelledRef.current = true; conn.close() }
+        else if (msg.kind === 'cancelled') { setStatus('idle'); cancelledRef.current = true; conn.close() }
+        else if (msg.kind === 'error') { setStatus('error'); setError(msg.message || 'Simulation error'); cancelledRef.current = true; conn.close() }
       },
     })
     connRef.current = conn
   }
 
+  function retryOrFail() {
+    if (welcomedRef.current || cancelledRef.current) return  // already connected or stopped
+    if (retriesRef.current < 40) {
+      retriesRef.current += 1
+      setTimeout(connectAttempt, 1500)
+    } else {
+      setStatus('error'); setError('Could not reach the engine. Is the app bridge running?')
+    }
+  }
+
   function cancel() {
+    cancelledRef.current = true
     connRef.current?.send({ type: 'control', action: 'simCancel' })
     setStatus('idle')
     connRef.current?.close()
