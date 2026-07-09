@@ -85,6 +85,20 @@ public final class BridgeGui extends AbstractGuiGame {
         return channel.ask(seat, d); // DecisionChannel tags type="prompt" + id and blocks
     }
 
+    /** Attach a DelayedReveal's cards to a choice prompt as "look at these" context. */
+    private void putReveal(Map<String, Object> extra, DelayedReveal dr) {
+        if (dr == null || dr.getCards() == null || dr.getCards().isEmpty()) return;
+        List<Object> rev = new ArrayList<>();
+        int i = 0;
+        for (CardView c : dr.getCards()) {
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", i++); o.put("id", c.getId()); o.put("label", c.getName());
+            rev.add(o);
+        }
+        extra.put("reveal", rev);
+        if (dr.getMessagePrefix() != null) extra.put("revealPrefix", dr.getMessagePrefix());
+    }
+
     /** Push a non-blocking UI-state message to this seat. */
     private void pushUi(Map<String, Object> msg) {
         msg.put("type", "ui");
@@ -217,6 +231,7 @@ public final class BridgeGui extends AbstractGuiGame {
         if (optionList == null || optionList.isEmpty()) return null;
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("optional", isOptional);
+        putReveal(extra, delayedReveal);
         JsonObject resp = ask("chooseEntity", title, serialize(optionList), extra);
         Integer ix = readInt(resp, "choice");
         if (ix == null || ix < 0 || ix >= optionList.size()) return null;
@@ -231,6 +246,7 @@ public final class BridgeGui extends AbstractGuiGame {
         Map<String, Object> extra = new LinkedHashMap<>();
         extra.put("min", min);
         extra.put("max", max);
+        putReveal(extra, delayedReveal);
         JsonObject resp = ask("chooseEntities", title, serialize(optionList), extra);
         for (int ix : readIntArray(resp, "choices")) {
             if (ix >= 0 && ix < optionList.size()) chosen.add(optionList.get(ix));
@@ -298,28 +314,100 @@ public final class BridgeGui extends AbstractGuiGame {
     }
 
     @Override
+    public Integer getInteger(String message, int min, int max, boolean sortDesc) { return askInteger(message, min, max); }
+    @Override
+    public Integer getInteger(String message, int min, int max, int cutoff) { return askInteger(message, min, max); }
+
+    /** Ask the client for a number in [min,max]; default to min if unanswered. */
+    private Integer askInteger(String message, int min, int max) {
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("min", min);
+        extra.put("max", max);
+        JsonObject resp = ask("getInteger", message, null, extra);
+        Integer v = readInt(resp, "value");
+        if (v == null) return min;
+        if (v < min) v = min;
+        if (max >= min && v > max) v = max;
+        return v;
+    }
+
+    @Override
     public Map<CardView, Integer> assignCombatDamage(CardView attacker, List<CardView> blockers, int damage,
                                                      GameEntityView defender, boolean overrideOrder, boolean maySkip) {
-        // First cut: assign all damage to the first blocker (legal), or to the
-        // defender (null key) if there are no blockers. Interactive ordering is a
-        // future prompt kind (DESIGN.md §11.5).
         Map<CardView, Integer> map = new LinkedHashMap<>();
-        if (blockers != null && !blockers.isEmpty()) {
-            map.put(blockers.get(0), damage);
-        } else {
-            map.put(null, damage);
+        if (blockers == null || blockers.isEmpty()) { map.put(null, damage); return map; }
+        // Trample (or "divide as you choose") lets excess spill onto the defender
+        // — the player or planeswalker — but only after each blocker has lethal.
+        boolean trample = attacker != null && attacker.getCurrentState() != null && attacker.getCurrentState().hasTrample();
+        boolean canDefender = defender != null && (overrideOrder || trample);
+        // Single blocker, fixed order, no trample spill: no choice to make.
+        if (blockers.size() == 1 && !overrideOrder && !canDefender) { map.put(blockers.get(0), damage); return map; }
+        // Options carry each blocker's lethal so the client can enforce the
+        // assign-lethal-before-moving-on rule (unless overrideOrder = free split).
+        List<Object> opts = new ArrayList<>();
+        for (int i = 0; i < blockers.size(); i++) {
+            CardView b = blockers.get(i);
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", i); o.put("id", b.getId()); o.put("label", b.getName());
+            o.put("lethal", Math.max(0, b.getLethalDamage()));
+            opts.add(o);
         }
+        if (canDefender) {
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", blockers.size()); o.put("id", -1); o.put("lethal", 0); o.put("isDefender", true);
+            o.put("label", defender instanceof PlayerView pv ? pv.getName() : "Defender");
+            opts.add(o);
+        }
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("amount", damage);
+        extra.put("maySkip", maySkip);
+        extra.put("mode", "damage");
+        extra.put("overrideOrder", overrideOrder);
+        if (attacker != null) extra.put("sourceName", attacker.getName());
+        JsonObject resp = ask("assignAmount", "Assign " + damage + " combat damage", opts, extra);
+        List<Integer> amounts = readIntArray(resp, "amounts");
+        int total = 0;
+        if (amounts.size() == opts.size()) {
+            for (int i = 0; i < opts.size(); i++) {
+                int a = Math.max(0, amounts.get(i));
+                if (i < blockers.size()) { if (a > 0) map.put(blockers.get(i), a); }
+                else if (a > 0) map.put(null, a); // defender row (trample overflow)
+                total += a;
+            }
+        }
+        // Safety: the engine expects the full `damage` assigned. If the client's
+        // split is invalid/absent, dump it all on the first blocker.
+        if (total != damage) { map.clear(); map.put(blockers.get(0), damage); }
         return map;
     }
 
     @Override
     public Map<Object, Integer> assignGenericAmount(CardView effectSource, Map<Object, Integer> target,
                                                     int amount, boolean atLeastOne, String amountLabel) {
-        // First cut: put the whole amount on the first candidate.
         Map<Object, Integer> result = new LinkedHashMap<>();
-        if (target != null && !target.isEmpty()) {
-            result.put(target.keySet().iterator().next(), amount);
+        if (target == null || target.isEmpty()) return result;
+        List<Object> keys = new ArrayList<>(target.keySet());
+        List<Object> opts = new ArrayList<>();
+        for (int i = 0; i < keys.size(); i++) {
+            Object k = keys.get(i);
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", i);
+            o.put("id", k instanceof GameEntityView g ? g.getId() : null);
+            o.put("label", labelOf(k));
+            opts.add(o);
         }
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("amount", amount);
+        extra.put("atLeastOne", atLeastOne);
+        extra.put("mode", "amount");
+        if (amountLabel != null) extra.put("label", amountLabel);
+        JsonObject resp = ask("assignAmount", amountLabel != null ? amountLabel : ("Distribute " + amount), opts, extra);
+        List<Integer> amts = readIntArray(resp, "amounts");
+        int total = 0;
+        if (amts.size() == keys.size()) {
+            for (int i = 0; i < keys.size(); i++) { int a = Math.max(0, amts.get(i)); result.put(keys.get(i), a); total += a; }
+        }
+        if (total != amount) { result.clear(); for (Object k : keys) result.put(k, 0); result.put(keys.get(0), amount); }
         return result;
     }
 
@@ -327,28 +415,115 @@ public final class BridgeGui extends AbstractGuiGame {
     public <T> forge.gui.interfaces.IGuiGame.OrderResult<T> order(String title, String top, int remainingObjectsMin,
             int remainingObjectsMax, List<T> sourceChoices, List<T> destChoices, CardView referenceCard,
             boolean sideboardingMode, boolean showRememberCheckbox) {
-        // First cut: keep the given order (no reordering UI yet).
-        List<T> ordered = new ArrayList<>();
-        if (destChoices != null) ordered.addAll(destChoices);
-        if (sourceChoices != null) ordered.addAll(sourceChoices);
-        return new forge.gui.interfaces.IGuiGame.OrderResult<>(ordered, false);
+        List<T> pool = new ArrayList<>();
+        if (destChoices != null) pool.addAll(destChoices);
+        if (sourceChoices != null) pool.addAll(sourceChoices);
+        int n = pool.size();
+        // Forge frames this as how many objects must *remain* in the source; we
+        // convert to how many *move* into the returned (ordered) list. -1 = no
+        // bound on that side. Pure ordering (order triggers, arrange the top of
+        // library) keeps every card, so movedMin==movedMax==n. A subset pick
+        // (scry: which cards go to the bottom; surveil: which go to the yard)
+        // lets the player choose a subset AND its order — a different UI.
+        int movedMin = remainingObjectsMax >= 0 ? Math.max(0, n - remainingObjectsMax) : 0;
+        int movedMax = remainingObjectsMin >= 0 ? Math.min(n, n - remainingObjectsMin) : n;
+        boolean subset = movedMin < n || movedMax < n;
+        if (n == 0 || (n == 1 && !subset)) return new forge.gui.interfaces.IGuiGame.OrderResult<>(pool, false);
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("min", movedMin);
+        extra.put("max", movedMax);
+        extra.put("subset", subset);
+        if (top != null) extra.put("top", top);
+        if (showRememberCheckbox) extra.put("remember", true);
+        if (referenceCard != null) extra.put("cardId", referenceCard.getId());
+        JsonObject resp = ask("order", title, serialize(pool), extra);
+        List<Integer> idxs = readIntArray(resp, "order");
+        List<T> result = subset ? pickByIndices(pool, idxs, movedMin, movedMax) : reorderByIndices(pool, idxs);
+        Boolean remember = readBool(resp, "remember");
+        return new forge.gui.interfaces.IGuiGame.OrderResult<>(result, remember != null && remember);
     }
 
     @Override
     public <T> List<T> insertInList(String title, T newItem, List<T> oldItems) {
         List<T> out = new ArrayList<>();
-        out.add(newItem);
         if (oldItems != null) out.addAll(oldItems);
+        if (out.isEmpty()) { out.add(newItem); return out; }
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("newItem", labelOf(newItem));
+        JsonObject resp = ask("insert", title, serialize(oldItems), extra);
+        Integer pos = readInt(resp, "position");
+        int p = (pos == null || pos < 0 || pos > out.size()) ? 0 : pos;
+        out.add(p, newItem);
         return out;
     }
 
     @Override
     public List<CardView> manipulateCardList(String title, Iterable<CardView> cards, Iterable<CardView> manipulable,
                                              boolean toTop, boolean toBottom, boolean toAnywhere) {
-        // Not used in the common path; return the cards unchanged.
-        List<CardView> out = new ArrayList<>();
-        if (cards != null) for (CardView c : cards) out.add(c);
+        List<CardView> list = new ArrayList<>();
+        if (cards != null) for (CardView c : cards) list.add(c);
+        if (list.size() <= 1) return list;
+        java.util.Set<Integer> movable = new java.util.HashSet<>();
+        if (manipulable != null) for (CardView c : manipulable) movable.add(c.getId());
+        List<Object> opts = new ArrayList<>();
+        for (int i = 0; i < list.size(); i++) {
+            CardView c = list.get(i);
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", i); o.put("id", c.getId()); o.put("label", c.getName());
+            o.put("movable", movable.contains(c.getId()));
+            opts.add(o);
+        }
+        Map<String, Object> extra = new LinkedHashMap<>();
+        extra.put("toTop", toTop); extra.put("toBottom", toBottom); extra.put("toAnywhere", toAnywhere);
+        JsonObject resp = ask("manipulate", title, opts, extra);
+        return reorderByIndices(list, readIntArray(resp, "order"));
+    }
+
+    /** Pick a subset from the pool by client-supplied indices, in the given order
+     *  (for scry/surveil/`many`: which cards move, ordered). Drops invalid/dup
+     *  indices; if the result count falls outside [min,max], fall back to the
+     *  first `min` cards so the engine still gets a legal answer. */
+    private static <T> List<T> pickByIndices(List<T> pool, List<Integer> order, int min, int max) {
+        List<T> out = new ArrayList<>();
+        boolean[] used = new boolean[pool.size()];
+        if (order != null) {
+            for (int ix : order) if (ix >= 0 && ix < pool.size() && !used[ix]) { out.add(pool.get(ix)); used[ix] = true; }
+        }
+        if (out.size() < min || out.size() > max) {
+            out.clear();
+            for (int i = 0; i < min && i < pool.size(); i++) out.add(pool.get(i));
+        }
         return out;
+    }
+
+    /** Rebuild a list from a client-supplied index order; keep original order if invalid. */
+    private static <T> List<T> reorderByIndices(List<T> pool, List<Integer> order) {
+        List<T> out = new ArrayList<>();
+        if (order != null && order.size() == pool.size()) {
+            boolean[] used = new boolean[pool.size()];
+            for (int ix : order) { if (ix >= 0 && ix < pool.size() && !used[ix]) { out.add(pool.get(ix)); used[ix] = true; } }
+        }
+        if (out.size() != pool.size()) { out.clear(); out.addAll(pool); }
+        return out;
+    }
+
+    @Override
+    public void updateRevealedCards(TrackableCollection<CardView> collection) {
+        if (collection == null || collection.isEmpty()) return;
+        List<Object> opts = new ArrayList<>();
+        int i = 0;
+        for (CardView c : collection) {
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("index", i++); o.put("id", c.getId()); o.put("label", c.getName());
+            o.put("zone", c.getZone() == null ? null : c.getZone().toString().toLowerCase(java.util.Locale.ROOT));
+            o.put("owner", c.getOwner() == null ? null : c.getOwner().getId());
+            opts.add(o);
+        }
+        Map<String, Object> msg = new LinkedHashMap<>();
+        msg.put("kind", "reveal");
+        msg.put("message", "Revealed cards");
+        msg.put("options", opts);
+        pushUi(msg);
     }
 
     @Override
@@ -516,7 +691,27 @@ public final class BridgeGui extends AbstractGuiGame {
     @Override public GameState getGamestate() { return null; }
     @Override public void setCard(CardView card) { }
     @Override public void setPlayerAvatar(LobbyPlayer player, IHasIcon ihi) { }
-    @Override public boolean isUiSetToSkipPhase(PlayerView playerTurn, PhaseType phase) { return false; }
+    // Arena-style stops: which (turn-relative) steps this seat wants a priority
+    // window at. A step not in the set is auto-passed server-side. Forge only
+    // consults this when the stack is empty, so you never miss responding to a
+    // spell/ability — you just don't stop at empty steps you didn't ask for.
+    // Absent (no client config yet) → stop everywhere (safe legacy behavior).
+    private static final Map<Integer, java.util.Set<String>> SEAT_STOPS = new java.util.concurrent.ConcurrentHashMap<>();
+    public static void setStops(int seat, java.util.Set<String> stops) {
+        if (stops == null) SEAT_STOPS.remove(seat); else SEAT_STOPS.put(seat, stops);
+    }
+
+    @Override
+    public boolean isUiSetToSkipPhase(PlayerView playerTurn, PhaseType phase) {
+        java.util.Set<String> stops = SEAT_STOPS.get(seat);
+        if (stops == null || phase == null) return false; // no config → never skip
+        boolean myTurn = ownerPlayer != null && ownerPlayer.getView() != null
+                && playerTurn != null && ownerPlayer.getView().getId() == playerTurn.getId();
+        // First-strike damage shares the "Combat Damage" stop toggle.
+        PhaseType p = phase == PhaseType.COMBAT_FIRST_STRIKE_DAMAGE ? PhaseType.COMBAT_DAMAGE : phase;
+        String key = (myTurn ? "my:" : "opp:") + p.name();
+        return !stops.contains(key); // skip (auto-pass) unless a stop is set here
+    }
     @Override public void showWaitingTimer(PlayerView forPlayer, String waitingForPlayerName) { }
     @Override public void applyDelta(DeltaPacket packet) { }
 }

@@ -187,11 +187,14 @@ public final class ViewSerializer {
         // The owner may review their own library contents — a known multiset. The
         // GameView hides library names even from the owner, so read the real Cards
         // from the live zone. Order is never sent (the UI groups by name).
-        p.put("library", index == viewerSeat ? libraryCards(real) : new ArrayList<>());
+        // Library is sent in true order (index 0 = top). `visible` marks a card the
+        // owner may actually see face-up right now (e.g. "play with the top card
+        // revealed"); the client shows the rest face-down in the ordered view.
+        p.put("library", index == viewerSeat ? libraryCards(real, pv) : new ArrayList<>());
         return p;
     }
 
-    private static List<Object> libraryCards(Player real) {
+    private static List<Object> libraryCards(Player real, PlayerView ownerView) {
         List<Object> out = new ArrayList<>();
         if (real == null) return out;
         for (Card c : real.getCardsIn(ZoneType.Library)) {
@@ -199,6 +202,10 @@ public final class ViewSerializer {
             m.put("id", c.getId());
             m.put("name", c.getName());
             m.put("types", c.getType() == null ? null : c.getType().toString());
+            boolean vis = false;
+            try { vis = ownerView != null && c.getView() != null && c.getView().canBeShownTo(ownerView); }
+            catch (Throwable t) { /* default hidden */ }
+            m.put("visible", vis);
             out.add(m);
         }
         return out;

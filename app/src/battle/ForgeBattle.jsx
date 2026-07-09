@@ -3,6 +3,7 @@ import Board from './Board.jsx'
 import LogPanel from './LogPanel.jsx'
 import { buildGs } from '../engine/adapter.js'
 import { loadArt } from '../engine/artLoader.js'
+import { STOP_GROUPS, loadStops, saveStops, stopKeys } from '../stops.js'
 
 const T = { gold: '#d4a843', goldDim: '#8a7030', text: '#d4cabb', red: '#c03030' }
 // Mana color letter -> Forge ManaAtom byte (for IGameController.useMana).
@@ -11,14 +12,19 @@ const MANA_BYTE = { W: 1, U: 2, B: 4, R: 8, G: 16, C: 32 }
 // Full-screen battle = your MTG Lab board + log panel, driven by Forge.
 // The adapter turns snapshot + ui + prompt into `gs`; clicks become Forge
 // IGameController actions (DESIGN.md §13).
-export default function ForgeBattle({ snapshot, ui, prompt, respond, action, mySeat, onExit }) {
+export default function ForgeBattle({ snapshot, ui, prompt, respond, action, sendControl, mySeat, onExit }) {
   const [art, setArt] = useState(null)
   const [combatDraft, setCombatDraft] = useState({ attack: {}, block: {}, order: {}, selected: null })
   const [showSettings, setShowSettings] = useState(false)
-  const [autoPass, setAutoPass] = useState(() => {
-    try { return localStorage.getItem('mtg_auto_pass') !== '0' } catch { return true }
-  })
-  useEffect(() => { try { localStorage.setItem('mtg_auto_pass', autoPass ? '1' : '0') } catch {} }, [autoPass])
+  // Arena-style stops. Auto-play is always on; these choose which steps the
+  // engine stops at (all others are auto-passed server-side). Sent on mount and
+  // whenever changed.
+  const [stops, setStops] = useState(loadStops)
+  useEffect(() => {
+    saveStops(stops)
+    if (sendControl) sendControl({ type: 'control', action: 'stops', stops: stopKeys(stops) })
+  }, [stops, sendControl])
+  function toggleStop(key) { setStops(s => ({ ...s, [key]: !s[key] })) }
   const [logWidth, setLogWidth] = useState(() => {
     try { const w = parseInt(localStorage.getItem('mtg_log_width')); if (w >= 180 && w <= 700) return w } catch {}
     return 270
@@ -31,28 +37,9 @@ export default function ForgeBattle({ snapshot, ui, prompt, respond, action, myS
     [snapshot, ui, prompt, art, mySeat, respond, action],
   )
 
-  // Auto-pass: Forge itself tells us whether you have any action other than
-  // passing (`hasActions`, computed at priority — it excludes pointless mana taps).
-  // When you don't, and auto-pass is on, we pass for you. This works on either
-  // player's turn (no turn/label gating). We don't auto-pass a mulligan, a combat
-  // declaration, or while an Undo is offered (so a just-played land keeps its undo
-  // window), and a blocking prompt (Channel A) is handled separately. hasActions
-  // defaults to true when unknown, so we never pass blindly.
-  // Auto-pass: Forge tells us (`hasActions`) whether you have any play other than
-  // passing, and labels the pass-priority button "End Turn" on either player's turn
-  // (mulligan="Mulligan", combat="Alpha Strike", a pending land-undo="Undo (N)" —
-  // none of which we auto-pass). When it's a plain priority pass with no plays and
-  // auto-pass is on, we pass for you. We depend on `ui` (a fresh object per message)
-  // so this re-arms every time priority returns across phases — not only when the
-  // boolean flips value.
-  const cancelLbl = ui?.cancelLabel || ''
-  const isPriorityPass = /end turn/i.test(cancelLbl)
-  const canAutoPass = !!(autoPass && ui && ui.ok && ui.hasActions === false && isPriorityPass && !prompt)
-  useEffect(() => {
-    if (!canAutoPass) return
-    const t = setTimeout(() => action('selectButtonOk'), 200)
-    return () => clearTimeout(t)
-  }, [canAutoPass, ui, action])
+  // Auto-play is handled entirely by the engine now: it auto-passes every step
+  // that isn't a configured stop (see the Stops toggles / isUiSetToSkipPhase),
+  // and only while the stack is empty — so responses are never skipped.
 
   // Clicking a selectable card → Forge selectCard. The adapter tagged the card's
   // single option with its id.
@@ -69,7 +56,8 @@ export default function ForgeBattle({ snapshot, ui, prompt, respond, action, myS
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         <Board gs={gs} onAction={handleAction} combatDraft={combatDraft} setCombatDraft={setCombatDraft} settings={settings}
           ui={ui} onUiOk={() => action('selectButtonOk')} onUiCancel={() => action('selectButtonCancel')}
-          onUseMana={c => action('useMana', { color: MANA_BYTE[c] || 0 })} />
+          onUseMana={c => action('useMana', { color: MANA_BYTE[c] || 0 })}
+          onSelectPlayer={id => action('selectPlayer', { playerId: id })} />
       </div>
       <LogDivider onDrag={dx => setLogWidth(w => Math.max(180, Math.min(700, w - dx)))} />
       <div style={{ width: logWidth, flexShrink: 0, overflow: 'hidden' }}>
@@ -87,17 +75,33 @@ export default function ForgeBattle({ snapshot, ui, prompt, respond, action, myS
             border: `1px solid ${T.gold}66`, borderRadius: 8, padding: 14, minWidth: 240,
             boxShadow: '0 8px 30px rgba(0,0,0,0.8)', fontFamily: "'Crimson Text', Georgia, serif",
           }}>
-            <div style={{ fontSize: 12, color: T.gold, fontFamily: 'Cinzel,serif', letterSpacing: 1, marginBottom: 10 }}>Settings</div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: T.text }}>
-              <input type="checkbox" checked={autoPass} onChange={e => setAutoPass(e.target.checked)} style={{ accentColor: T.gold }} />
-              Auto-pass when you have no plays
-            </label>
-            <div style={{ fontSize: 10, color: T.goldDim, marginTop: 6, lineHeight: 1.4 }}>
-              Automatically passes priority during steps where you can't do anything (you keep control whenever you have a play).
+            <div style={{ fontSize: 12, color: T.gold, fontFamily: 'Cinzel,serif', letterSpacing: 1, marginBottom: 4 }}>Stops</div>
+            <div style={{ fontSize: 10, color: T.goldDim, marginBottom: 10, lineHeight: 1.4 }}>
+              Auto-play is always on — the game stops only at the steps you enable (and never skips while something is on the stack).
             </div>
+            <StopsRow stops={stops} onToggle={toggleStop} />
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// Arena-style stop toggles: five little pills, one per phase group. Enabling one
+// makes the game stop there (on either player's turn) instead of auto-passing.
+function StopsRow({ stops, onToggle }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {STOP_GROUPS.map(g => {
+        const on = !!stops[g.key]
+        return (
+          <button key={g.key} onClick={() => onToggle(g.key)} title={on ? 'Stop here' : 'Auto-pass here'} style={{
+            fontSize: 10, padding: '5px 9px', borderRadius: 6, cursor: 'pointer', fontFamily: 'Cinzel,serif', letterSpacing: 0.5,
+            background: on ? 'rgba(212,168,67,0.25)' : 'rgba(255,255,255,0.03)',
+            border: `1px solid ${on ? T.gold : T.goldDim + '66'}`, color: on ? T.gold : T.text,
+          }}>{g.label}</button>
+        )
+      })}
     </div>
   )
 }

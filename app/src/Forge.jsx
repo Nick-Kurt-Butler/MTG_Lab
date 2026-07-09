@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { loadArtOverrides, setArtOverride, clearArtOverride, fetchPrintings, loadArtCounts, recordArtCount } from './engine/artOverrides.js'
+import { loadArtOverrides, setArtOverride, clearArtOverride, fetchPrintings, loadArtCounts, recordArtCount, loadDefaultCodes, resolveDefaultCode } from './engine/artOverrides.js'
 import { cimg } from './engine/img.js'
 
 const MTG_BACK = 'https://backs.scryfall.io/large/59/b/59b15dba-3a0e-4b44-a34e-4e498e494c7c.jpg?1698702067'
@@ -64,8 +64,37 @@ function loadDecksLocal() { try { return JSON.parse(localStorage.getItem(DECKS_K
 function loadTrash() { try { return JSON.parse(localStorage.getItem(TRASH_KEY)||'[]') } catch { return [] } }
 function saveTrash(t) { localStorage.setItem(TRASH_KEY, JSON.stringify(t.slice(0, MAX_TRASH))) }
 
-const SORT_OPTS = ['name','cmc','price','popularity','decks']
-const SORT_MAP = { name:'name', cmc:'cmc', price:'usd_price', popularity:'popularity', decks:'decks' }
+// Per-deck art assignments (separate from the global default in mtg_card_art, and
+// separate from the game deck itself so counts/curve/battle are never touched):
+//   { [deckName]: { [cardName]: [ { set, collector, image_url, image_url_back, qty } ] } }
+// A card can have several art groups in one deck (e.g. two different Plains arts);
+// any copies not covered by a group fall back to the global default art.
+const DECK_ARTS_KEY = 'mtg_deck_arts'
+function loadDeckArtsLocal() { try { return JSON.parse(localStorage.getItem(DECK_ARTS_KEY) || '{}') } catch { return {} } }
+function saveDeckArts(a) { localStorage.setItem(DECK_ARTS_KEY, JSON.stringify(a)) }
+// A printing "art code" as the deck sites write it, e.g. { set:'hob', collector:'194' } → "(HOB) 194".
+function artCode(a) { return a && a.set && a.collector ? `(${String(a.set).toUpperCase()}) ${a.collector}` : '' }
+
+const SORT_OPTS = ['name','cmc','price','popularity','type']
+// "popularity" sorts by how many decks run the card (its real popularity signal).
+const SORT_MAP = { name:'name', cmc:'cmc', price:'usd_price', popularity:'decks' }
+
+// Card-type grouping order (shared by the deck list and the "type" sort).
+const TYPE_ORDER = ['Creature','Planeswalker','Instant','Sorcery','Enchantment','Artifact','Land','Other']
+function typeRankOf(card) {
+  const bt = card?.base_type || ''
+  for (let i = 0; i < TYPE_ORDER.length; i++) if (bt.includes(TYPE_ORDER[i])) return i
+  return TYPE_ORDER.length
+}
+
+// Escape a user search term so it's safe inside a RegExp.
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+// Whole-word matcher: "bat" matches the word bat but not "battlefield". Multiple
+// terms are AND-ed (each must appear as a whole word somewhere on the card).
+function buildSearchMatchers(query) {
+  const words = (query || '').toLowerCase().split(/\s+/).filter(Boolean)
+  return words.map(w => new RegExp(`\\b${escapeRegex(w)}\\b`))
+}
 // Formats we expose as a legality filter. The value is the key Forge/Scryfall use
 // in each card's `legal` array; the label is what we show on the pill.
 const FORMATS = [
@@ -77,6 +106,16 @@ const COLOR_MAP = {'W':'White','U':'Blue','B':'Black','R':'Red','G':'Green','C':
 const RARITY_MAP = {'C':'Common','U':'Uncommon','R':'Rare','M':'Mythic','S':'Special','L':'Land'}
 const TYPE_EXCLUDE = new Set(['Kindred','Snow','Basic'])
 const COLOR_ACTIVE = {'W':'#f0ede0','U':'#4a7ab5','B':'#8a8a8a','R':'#c44','G':'#4a8a4a','C':'#888'}
+
+// Small inline pencil (SVG, not an emoji) used for edit affordances.
+function PencilIcon({ size = 12, color = colors.gold }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  )
+}
 
 function ColorPill({ code, name, active, onClick }) {
   return (
@@ -117,22 +156,6 @@ function Toggle({ checked, onChange, children }) {
       <input type="checkbox" checked={checked} onChange={onChange} style={{accentColor:colors.gold,width:11,height:11}} />
       {children}
     </label>
-  )
-}
-
-function RenameInline({ activeDeck, decks, onRename }) {
-  const [editing, setEditing] = useState(false)
-  const [val, setVal] = useState('')
-  if (!editing) return (
-    <button onClick={()=>{setVal(activeDeck);setEditing(true)}} style={{...btnStyle,fontSize:10}}>Rename</button>
-  )
-  return (
-    <div style={{display:'flex',gap:4}}>
-      <input value={val} onChange={e=>setVal(e.target.value)} autoFocus
-        style={{flex:1,padding:'3px 6px',background:'#1e1e24',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:4,fontSize:11,outline:'none'}} />
-      <button onClick={()=>{onRename(activeDeck,val);setEditing(false)}} style={{...btnStyle,fontSize:10,color:colors.gold}}>✓</button>
-      <button onClick={()=>setEditing(false)} style={{...btnStyle,fontSize:10}}>✕</button>
-    </div>
   )
 }
 
@@ -210,20 +233,32 @@ function CardCell({ card, width, count, flipped, artOverride, singleArt, onAdd, 
         onContextMenu={e => { e.preventDefault(); e.stopPropagation(); onFlip(card.name) }}>
         <CardImg src={flipped ? (backUrl || MTG_BACK) : (frontUrl || MTG_BACK)} alt={card.name}
           style={{ width: '100%', borderRadius: 8, display: 'block', boxShadow: '0 2px 8px rgba(0,0,0,0.6)' }} />
-        {/* Choose alternate art (per-user override). */}
+        {/* Action bar along the bottom edge: −, flip (DFC), art, +. Kept off the
+            top corners so the card's mana cost stays visible. */}
         <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '7%', display: 'flex', borderRadius: '0 0 8px 8px', overflow: 'hidden' }}>
+          {count > 0 && (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', borderRight: '1px solid rgba(201,168,76,0.3)', color: colors.gold, fontSize: 11, fontWeight: 'bold', fontFamily: 'Cinzel,serif', pointerEvents: 'none' }}>×{count}</div>
+          )}
           <div onClick={e => { e.stopPropagation(); onRemove(card.name) }}
             style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'background 0.12s', background: '#000', borderRight: '1px solid rgba(201,168,76,0.3)' }}
             onMouseEnter={e => e.currentTarget.style.background = 'rgba(154,58,58,0.7)'}
             onMouseLeave={e => e.currentTarget.style.background = '#000'}>
             <span style={{ color: '#df7a7a', fontSize: 12, fontWeight: 'bold' }}>−</span>
           </div>
+          {backUrl && (
+            <div onClick={e => { e.stopPropagation(); onFlip(card.name) }} title="Flip card"
+              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'background 0.12s', background: flipped ? 'rgba(201,168,76,0.35)' : '#000', borderRight: '1px solid rgba(201,168,76,0.3)' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(201,168,76,0.5)'}
+              onMouseLeave={e => e.currentTarget.style.background = flipped ? 'rgba(201,168,76,0.35)' : '#000'}>
+              <span style={{ color: colors.gold, fontSize: 12 }}>⟳</span>
+            </div>
+          )}
           {card.multi_art && !singleArt && (
             <div onClick={e => { e.stopPropagation(); onArt(card.name) }} title="Change art"
-              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'background 0.12s', background: artOverride ? 'rgba(201,168,76,0.25)' : '#000', borderRight: '1px solid rgba(201,168,76,0.3)' }}
+              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'background 0.12s', background: '#000', borderRight: '1px solid rgba(201,168,76,0.3)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'rgba(201,168,76,0.5)'}
-              onMouseLeave={e => e.currentTarget.style.background = artOverride ? 'rgba(201,168,76,0.25)' : '#000'}>
-              <span style={{ fontSize: 10 }}>🎨</span>
+              onMouseLeave={e => e.currentTarget.style.background = '#000'}>
+              <span style={{ fontSize: 10, opacity: artOverride ? 1 : 0.55 }}>🎨</span>
             </div>
           )}
           <div onClick={e => { e.stopPropagation(); onAdd(card.name) }}
@@ -233,32 +268,43 @@ function CardCell({ card, width, count, flipped, artOverride, singleArt, onAdd, 
             <span style={{ color: '#7adf7a', fontSize: 12, fontWeight: 'bold' }}>+</span>
           </div>
         </div>
-        {count && (
-          <div style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.8)', color: colors.gold, fontWeight: 'bold', fontSize: 11, borderRadius: 3, padding: '1px 5px', fontFamily: 'Cinzel,serif', pointerEvents: 'none' }}>×{count}</div>
-        )}
       </div>
       <div style={{ fontSize: 9, color: colors.textMuted }}>{card.rarity} · ${card.usd_price?.toFixed(2)}</div>
-      {card.popularity > 0 && <div style={{ fontSize: 9, color: '#7a7060' }}>{card.popularity}% · {card.decks?.toLocaleString()} decks</div>}
+      {card.decks > 0 && <div style={{ fontSize: 9, color: '#7a7060' }}>{card.popularity > 0 ? `${card.popularity}% · ` : ''}{card.decks?.toLocaleString()} decks</div>}
     </div>
   )
 }
 
 // Alternate-art picker: fetches every printing of a card from Scryfall and lets
 // the user set one as their per-user default. Modeled on the zone-viewer modal.
-function ArtPicker({ name, current, onPick, onReset, onClose, onCount }) {
+function ArtPicker({ name, current, deckMode, onPick, onReset, onClose, onCount }) {
   const [prints, setPrints] = useState(null)
+  // In the deck view: "change" swaps just this printing's art; "add" adds a new
+  // copy with the picked printing (a distinct art group) without touching others.
+  const [addMode, setAddMode] = useState(false)
   useEffect(() => {
     let alive = true
     setPrints(null)
     fetchPrintings(name).then(p => { if (alive) { setPrints(p); onCount?.(name, p.length) } })
     return () => { alive = false }
   }, [name])
+  const modeBtn = (on, label, sub) => ({
+    fontSize: 10, padding: '4px 10px', borderRadius: 5, cursor: 'pointer', fontFamily: 'Cinzel,serif',
+    background: on ? 'rgba(201,168,76,0.25)' : 'rgba(255,255,255,0.04)',
+    border: `1px solid ${on ? colors.gold : colors.goldDim}`, color: on ? colors.gold : colors.textMuted,
+  })
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(3px)' }}>
       <div onClick={e => e.stopPropagation()} style={{ background: colors.surface, border: `1px solid ${colors.gold}`, borderRadius: 8, padding: 18, width: '85vw', maxWidth: 1400, maxHeight: '88vh', overflow: 'auto', minWidth: 360, boxShadow: `0 0 40px ${colors.gold}25` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
           <span style={{ fontSize: 14, color: colors.gold, fontFamily: 'Cinzel,serif', letterSpacing: 1 }}>Choose Art — {name}</span>
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            {deckMode && (
+              <div style={{ display: 'flex', gap: 4, marginRight: 4 }}>
+                <button onClick={() => setAddMode(false)} style={modeBtn(!addMode)} title="Replace this printing's art">Change art</button>
+                <button onClick={() => setAddMode(true)} style={modeBtn(addMode)} title="Add a new copy with the chosen art">Add new copy</button>
+              </div>
+            )}
             {current && <button onClick={onReset} style={{ ...btnStyle, fontSize: 10 }}>Reset to default</button>}
             <button onClick={onClose} style={{ ...btnStyle, fontSize: 10 }}>✕</button>
           </div>
@@ -272,7 +318,7 @@ function ArtPicker({ name, current, onPick, onReset, onClose, onCount }) {
             {prints.map(p => {
               const sel = current?.image_url === p.image_url
               return (
-                <div key={p.id} onClick={() => onPick({ image_url: p.image_url, image_url_back: p.image_url_back })}
+                <div key={p.id} onClick={() => onPick({ image_url: p.image_url, image_url_back: p.image_url_back, set: p.setCode, collector: p.collector }, addMode)}
                   style={{ cursor: 'pointer', textAlign: 'center', border: `2px solid ${sel ? colors.gold : 'transparent'}`, borderRadius: 8, padding: 4, transition: 'border-color 0.12s' }}>
                   <img src={cimg(p.image_url)} alt="" draggable={false} loading="lazy" style={{ width: '100%', borderRadius: 6, display: 'block', boxShadow: sel ? `0 0 10px ${colors.gold}` : '0 2px 8px rgba(0,0,0,0.6)' }} />
                   <div style={{ fontSize: 8, color: colors.textMuted, marginTop: 3 }}>{p.set} · #{p.collector}</div>
@@ -323,9 +369,11 @@ export default function Forge() {
   const [sortAsc, setSortAsc] = useState(false)
   const [selFormat, setSelFormat] = useState('')
   const [staplesOnly, setStaplesOnly] = useState(true)
-  const [filterDeck, setFilterDeck] = useState('(all)')
+  const [deckView, setDeckView] = useState(false)   // "Show deck": render the active deck's cards (with per-art duplicates) instead of the catalog
   const [flippedCards, setFlippedCards] = useState(new Set())
   const [overrides, setOverrides] = useState(loadArtOverrides)
+  const [deckArts, setDeckArts] = useState(loadDeckArtsLocal)
+  const [defaultCodes, setDefaultCodes] = useState(loadDefaultCodes)
   const [artCounts, setArtCounts] = useState(loadArtCounts)
   const [artPickerCard, setArtPickerCard] = useState(null)
 
@@ -345,6 +393,9 @@ export default function Forge() {
           c.multi_art = c.multi_art !== false
           c.color_identity = c.color_identity || 'C'
           c.colors = c.colors || 'C'
+          // One lowercased haystack of every word on the card (name, both faces,
+          // type line, rules text) for whole-word search.
+          c._search = `${c.name||''} ${c.name_2||''} ${c.type_line||''} ${c.oracle_text||''}`.toLowerCase()
         })
         setCards(arr)
         setLoading(false)
@@ -375,21 +426,36 @@ export default function Forge() {
     // else: already seeded and the user has no decks → respect that, don't re-seed.
   }, [])
 
+  // Resolve default-printing codes for the active deck's cards in the background
+  // (cached permanently), so the text view shows an art code on every line.
+  useEffect(() => {
+    const names = Object.keys(decks[activeDeck] || {})
+    if (!names.length || !cards.length) return
+    let cancelled = false
+    ;(async () => {
+      let any = false
+      for (const name of names) {
+        if (cancelled) return
+        if (loadDefaultCodes()[name]) continue
+        const card = cards.find(x => x.name === name)
+        const dc = await resolveDefaultCode(name, card?.image_url)
+        if (dc) any = true
+      }
+      if (any && !cancelled) setDefaultCodes(loadDefaultCodes())
+    })()
+    return () => { cancelled = true }
+  }, [activeDeck, cards, decks])
+
   const rarities = [...new Set(cards.map(c=>c.rarity).filter(Boolean))].sort()
   const allTypes = [...new Set(cards.flatMap(c=>[...c.all_types]).filter(t=>!TYPE_EXCLUDE.has(t)))].sort()
 
-  const filtered = cards.filter(c => {
+  const searchMatchers = buildSearchMatchers(search)
+  // Left-panel filters (color/format/type/cmc/price/search/staples). Applied in
+  // both catalog browse AND the deck view.
+  const passesFilters = c => {
     if (staplesOnly && !c.decks) return false
-    if (search) {
-      const q = search.toLowerCase()
-      const words = q.split(' ')
-      if (!words.every(w =>
-        (c.name||'').toLowerCase().includes(w) ||
-        (c.name_2||'').toLowerCase().includes(w) ||
-        (c.oracle_text||'').toLowerCase().includes(w) ||
-        (c.type_line||'').toLowerCase().includes(w)
-      )) return false
-    }
+    // Whole-word search across name/type/rules text; every term must match.
+    if (searchMatchers.length && !searchMatchers.every(re => re.test(c._search || ''))) return false
     if (selColors.length) {
       // color_identity is a concatenated string like "BG" / "WUB", so split by char.
       const sel = new Set(selColors)
@@ -408,28 +474,28 @@ export default function Forge() {
     if (selTypes.length && !selTypes.some(t=>c.all_types.has(t))) return false
     if (c.cmc < cmcRange[0] || c.cmc > cmcRange[1]) return false
     if (c.usd_price < priceRange[0] || c.usd_price > priceRange[1]) return false
-    if (filterDeck !== '(all)' && decks[filterDeck]) {
-      if (!decks[filterDeck][c.name]) return false
-    }
     return true
-  }).sort((a,b) => {
+  }
+  const sortCmp = (a,b) => {
+    // "type" groups exactly like the deck's right-panel list (Creature, PW,
+    // Instant, …), then alphabetically within a type. The asc/desc toggle flips
+    // the whole ordering.
+    if (sortBy === 'type') {
+      const ra = typeRankOf(a), rb = typeRankOf(b)
+      const cmp = ra !== rb ? ra - rb : a.name.localeCompare(b.name)
+      return sortAsc ? -cmp : cmp
+    }
     const key = SORT_MAP[sortBy] || sortBy
     const av = a[key]||0, bv = b[key]||0
     if (typeof av === 'string') return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av)
     return sortAsc ? av-bv : bv-av
-  })
+  }
+  const filteredCards = cards.filter(passesFilters).sort(sortCmp)
+  // name -> catalog card (for the deck view to pull metadata/filtering).
+  const cardMap = {}
+  for (const c of cards) cardMap[c.name] = c
 
   const toggleFlip = name => setFlippedCards(s => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
-
-  // ── Virtualized grid geometry (only the visible rows are rendered) ──
-  const GAP = 12, PAD = 12, CARD_MIN = 110, CARD_RATIO = 0.715, LABEL_H = 32, OVERSCAN = 3
-  const innerW = Math.max(0, vp.w - PAD * 2)
-  const cols = Math.max(1, Math.floor((innerW + GAP) / (CARD_MIN + GAP)))
-  const cardW = (innerW - GAP * (cols - 1)) / cols
-  const rowH = cardW / CARD_RATIO + LABEL_H + GAP
-  const totalRows = Math.ceil(filtered.length / cols)
-  const firstRow = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN)
-  const lastRow = Math.min(totalRows, Math.ceil((scrollTop + vp.h) / rowH) + OVERSCAN)
 
   function addToDeck(name) {
     if (!activeDeck) return
@@ -446,6 +512,66 @@ export default function Forge() {
       if (deck[name]<=0) delete deck[name]
       const nd = {...d,[activeDeck]:deck}
       saveDecks(nd); return nd
+    })
+  }
+  // Deck-view +/-: add or remove a copy of the SPECIFIC printing shown on the
+  // cell (matched by set/collector), keeping the total count and the per-art
+  // group in sync so the shown artwork is what actually gets added.
+  const sameArt = (g, art) => (g.set || '') === (art.set || '') && String(g.collector || '') === String(art.collector || '')
+  function addDeckArtCopy(name, art) {
+    if (!activeDeck) return
+    setDecks(d => { const nd = { ...d, [activeDeck]: { ...(d[activeDeck] || {}), [name]: (d[activeDeck]?.[name] || 0) + 1 } }; saveDecks(nd); return nd })
+    setDeckArts(prev => {
+      const nd = { ...prev, [activeDeck]: { ...(prev[activeDeck] || {}) } }
+      const groups = nd[activeDeck][name] ? nd[activeDeck][name].map(g => ({ ...g })) : []
+      const g = groups.find(x => sameArt(x, art))
+      if (g) g.qty = (g.qty || 0) + 1
+      else groups.push({ set: art.set || '', collector: art.collector || '', image_url: art.image_url, image_url_back: art.image_url_back || '', qty: 1 })
+      nd[activeDeck][name] = groups; saveDeckArts(nd); return nd
+    })
+  }
+  function removeDeckArtCopy(name, art) {
+    if (!activeDeck) return
+    setDecks(d => { const deck = { ...(d[activeDeck] || {}) }; deck[name] = (deck[name] || 1) - 1; if (deck[name] <= 0) delete deck[name]; const nd = { ...d, [activeDeck]: deck }; saveDecks(nd); return nd })
+    setDeckArts(prev => {
+      const nd = { ...prev, [activeDeck]: { ...(prev[activeDeck] || {}) } }
+      let groups = nd[activeDeck][name] ? nd[activeDeck][name].map(g => ({ ...g })) : []
+      const g = groups.find(x => sameArt(x, art))
+      if (g) { g.qty = (g.qty || 0) - 1; if (g.qty <= 0) groups = groups.filter(x => x !== g) }
+      if (groups.length) nd[activeDeck][name] = groups; else delete nd[activeDeck][name]
+      saveDeckArts(nd); return nd
+    })
+  }
+  // Deck LIST +/-: one row per card. + adds a copy of the art with the FEWEST
+  // copies; − removes from the art with the MOST. A code-less default copy just
+  // adjusts the total.
+  function addSmallest(name, total) {
+    const entries = deckEntriesFor(name, total)
+    if (!entries.length) return addToDeck(name)
+    const e = entries.reduce((a, b) => (b.qty < a.qty ? b : a))
+    if (e.set) addDeckArtCopy(name, e); else addToDeck(name)
+  }
+  function removeLargest(name, total) {
+    const entries = deckEntriesFor(name, total)
+    if (!entries.length) return removeFromDeck(name)
+    const e = entries.reduce((a, b) => (b.qty > a.qty ? b : a))
+    if (e.set) removeDeckArtCopy(name, e); else removeFromDeck(name)
+  }
+  // Re-art just ONE printing: move its `qty` copies from `fromArt` (a group, or
+  // the unassigned default pool) to `newArt`. Total unchanged, other art groups
+  // of the same card are untouched (so mixed art no longer collapses).
+  function setGroupArt(name, fromArt, qty, newArt) {
+    if (!activeDeck || qty <= 0) return
+    setDeckArts(prev => {
+      const nd = { ...prev, [activeDeck]: { ...(prev[activeDeck] || {}) } }
+      let groups = nd[activeDeck][name] ? nd[activeDeck][name].map(g => ({ ...g })) : []
+      const from = groups.find(g => sameArt(g, fromArt))
+      if (from) { from.qty = (from.qty || 0) - qty; if (from.qty <= 0) groups = groups.filter(g => g !== from) }
+      const to = groups.find(g => sameArt(g, newArt))
+      if (to) to.qty = (to.qty || 0) + qty
+      else groups.push({ set: newArt.set || '', collector: newArt.collector || '', image_url: newArt.image_url, image_url_back: newArt.image_url_back || '', qty })
+      if (groups.length) nd[activeDeck][name] = groups; else delete nd[activeDeck][name]
+      saveDeckArts(nd); return nd
     })
   }
   function createDeck() {
@@ -474,6 +600,69 @@ export default function Forge() {
 
   const deck = decks[activeDeck]||{}
   const deckTotal = Object.values(deck).reduce((s,v)=>s+v,0)
+
+  // The art to show for a card right now: the active deck's chosen art when a
+  // deck filter is on (its primary group), otherwise the global default. Picking
+  // art on the main view (no filter) edits the global default.
+  function effectiveArt(name) {
+    if (deckView) {
+      const g = deckArts[activeDeck]?.[name]?.[0]
+      if (g) return { image_url: g.image_url, image_url_back: g.image_url_back }
+    }
+    return overrides[name] || null
+  }
+  function clearDeckArt(deckName, name) {
+    setDeckArts(prev => { const nd = { ...prev, [deckName]: { ...(prev[deckName] || {}) } }; delete nd[deckName][name]; saveDeckArts(nd); return nd })
+  }
+  // Split a card's copies into display entries: one per art group (capped to the
+  // real count) plus a default-art remainder. Drives the deck list (duplicates
+  // for mixed art) and the text export.
+  function deckEntriesFor(name, total) {
+    const groups = deckArts[activeDeck]?.[name] || []
+    const out = []
+    let assigned = 0
+    for (const g of groups) {
+      const q = Math.min(g.qty || 0, total - assigned)
+      if (q > 0) { out.push({ qty: q, code: artCode(g), set: g.set, collector: g.collector, image_url: g.image_url, image_url_back: g.image_url_back }); assigned += q }
+    }
+    const rem = total - assigned
+    // Default copies carry the global-default override's code, else the card's
+    // resolved default-printing code, so every line ends up with an art code.
+    const dOv = overrides[name]
+    const dc = dOv?.set ? dOv : defaultCodes[name]
+    const defEntry = { code: artCode(dOv) || artCode(defaultCodes[name]), set: dc?.set || '', collector: dc?.collector || '', image_url: dOv?.image_url, image_url_back: dOv?.image_url_back, isDefault: true }
+    if (out.length === 0) out.push({ qty: total, ...defEntry })
+    else if (rem > 0) out.push({ qty: rem, ...defEntry })
+    return out
+  }
+
+  // "Show deck" view: one grid cell per art group (so mixed art duplicates, e.g.
+  // two different Plains), each with its own art + count, filtered by the left
+  // panel and sorted like the catalog. Off = normal catalog browse.
+  function buildDeckViewCells() {
+    const out = []
+    for (const [name, total] of Object.entries(deck)) {
+      const c = cardMap[name]
+      if (!c || !passesFilters(c)) continue
+      deckEntriesFor(name, total).forEach((e, i) => {
+        out.push({ card: c, qty: e.qty, art: { image_url: e.image_url, image_url_back: e.image_url_back, set: e.set, collector: e.collector }, key: `${name}#${i}` })
+      })
+    }
+    return out.sort((a, b) => sortCmp(a.card, b.card))
+  }
+  const displayList = deckView
+    ? buildDeckViewCells()
+    : filteredCards.map(c => ({ card: c, qty: deck[c.name], art: effectiveArt(c.name), key: c.name }))
+
+  // ── Virtualized grid geometry (only the visible rows are rendered) ──
+  const GAP = 12, PAD = 12, CARD_MIN = 110, CARD_RATIO = 0.715, LABEL_H = 32, OVERSCAN = 3
+  const innerW = Math.max(0, vp.w - PAD * 2)
+  const cols = Math.max(1, Math.floor((innerW + GAP) / (CARD_MIN + GAP)))
+  const cardW = (innerW - GAP * (cols - 1)) / cols
+  const rowH = cardW / CARD_RATIO + LABEL_H + GAP
+  const totalRows = Math.ceil(displayList.length / cols)
+  const firstRow = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN)
+  const lastRow = Math.min(totalRows, Math.ceil((scrollTop + vp.h) / rowH) + OVERSCAN)
   const deckCost = Object.entries(deck).reduce((s,[n,q])=>{const c=cards.find(x=>x.name===n);return s+(c?.usd_price||0)*q},0)
 
   // Mana curve data
@@ -492,33 +681,83 @@ export default function Forge() {
   })
   const totalColorPips = Math.max(1,Object.values(colorDist).reduce((s,v)=>s+v,0))
 
-  // Import/Export
-  const [showImportExport, setShowImportExport] = useState(false)
-  const [importText, setImportText] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [trash, setTrash] = useState(() => loadTrash())
   const [showTrash, setShowTrash] = useState(false)
+  // Deck-name rename (pencil in the deck picker) + edit-as-text (pencil on the
+  // Deck section) state.
+  const [renaming, setRenaming] = useState(false)
+  const [renameVal, setRenameVal] = useState('')
+  const [deckEdit, setDeckEdit] = useState(false)
+  const [deckText, setDeckText] = useState('')
 
-  function exportDeck() {
-    const lines = Object.entries(deck).map(([name,qty])=>`${qty} ${name}`)
-    navigator.clipboard.writeText(lines.join('\n'))
-    setImportText('Copied to clipboard!')
-    setTimeout(()=>setImportText(''),2000)
+  function commitRename() {
+    const newName = renameVal.trim()
+    if (!newName || newName === activeDeck || decks[newName]) { setRenaming(false); return }
+    setDecks(d => { const nd = { ...d }; nd[newName] = nd[activeDeck]; delete nd[activeDeck]; saveDecks(nd); return nd })
+    setActiveDeck(newName); setRenaming(false)
   }
-  function importDeck() {
-    const newDeck = {}
-    importText.split('\n').forEach(line=>{
-      const m = line.trim().match(/^(\d+)\s+(.+)$/)
-      if (m) { const qty=parseInt(m[1]); const name=m[2].trim(); if(qty>0) newDeck[name]=(newDeck[name]||0)+qty }
-    })
-    if (Object.keys(newDeck).length) {
-      setDecks(d=>{const nd={...d,[activeDeck]:newDeck};saveDecks(nd);return nd})
-      setShowImportExport(false); setImportText('')
+
+  // Deck ⇄ text. Each line is "qty Name", plus an optional [set:collector] art
+  // code when the card has a chosen printing, so art survives copy/paste/import.
+  // Every line carries the printing art code "(SET) COLLECTOR" when known; mixed
+  // art shows as multiple lines for the same card (e.g. two different Plains).
+  function deckToText() {
+    const lines = []
+    for (const [name, total] of Object.entries(deck)) {
+      for (const e of deckEntriesFor(name, total)) lines.push(`${e.qty} ${name}${e.code ? ' ' + e.code : ''}`)
     }
+    return lines.join('\n')
+  }
+  function applyDeckText(text) {
+    const newDeck = {}
+    const linesByName = {}   // name -> [{ set?, collector?, qty }] in order
+    text.split('\n').forEach(line => {
+      const t = line.trim()
+      if (!t) return
+      // "N Name (SET) COLLECTOR" (deck-site style) or legacy "N Name [set:collector]".
+      const m = t.match(/^(\d+)\s+(.+?)(?:\s+\(([^)]+)\)\s*(\S+)|\s+\[([^:\]]+):([^\]]+)\])?$/)
+      if (!m) return
+      const qty = parseInt(m[1]); if (!(qty > 0)) return
+      const name = m[2].trim()
+      newDeck[name] = (newDeck[name] || 0) + qty
+      const set = m[3] || m[5], collector = m[4] || m[6]
+      ;(linesByName[name] = linesByName[name] || []).push({ set: set && set.trim(), collector: collector && collector.trim(), qty })
+    })
+    if (!Object.keys(newDeck).length) return
+    setDecks(d => { const nd = { ...d, [activeDeck]: newDeck }; saveDecks(nd); return nd })
+    // Resolve every line to a printing and store as this deck's per-card art. A
+    // line with an explicit (SET) code uses that printing; a line with NO code
+    // gets the card's default printing code attached, so every copy is art-coded.
+    ;(async () => {
+      const resolved = {}
+      for (const [name, lines] of Object.entries(linesByName)) {
+        const card = cards.find(x => x.name === name)
+        let prints = null
+        const arr = []
+        for (const ln of lines) {
+          let code = (ln.set && ln.collector) ? { set: ln.set, collector: ln.collector } : null
+          if (!code) code = await resolveDefaultCode(name, card?.image_url)   // backfill default
+          let art = { set: '', collector: '', image_url: card?.image_url, image_url_back: card?.image_url_back || '' }
+          if (code) {
+            try { prints = prints || await fetchPrintings(name) } catch { prints = [] }
+            const p = (prints || []).find(x => (x.setCode || '').toLowerCase() === code.set.toLowerCase() && String(x.collector) === String(code.collector))
+            art = { set: code.set, collector: code.collector, image_url: p ? p.image_url : card?.image_url, image_url_back: p ? p.image_url_back : (card?.image_url_back || '') }
+          }
+          arr.push({ ...art, qty: ln.qty })
+        }
+        resolved[name] = arr
+      }
+      setDeckArts(prev => {
+        const nd = { ...prev, [activeDeck]: { ...(prev[activeDeck] || {}) } }
+        for (const [name, arr] of Object.entries(resolved)) nd[activeDeck][name] = arr
+        saveDeckArts(nd); return nd
+      })
+      setDefaultCodes(loadDefaultCodes())
+    })()
   }
 
-  // Type order for deck display
-  const TYPE_ORDER = ['Creature','Planeswalker','Instant','Sorcery','Enchantment','Artifact','Land','Other']
+  // Type order for deck display (TYPE_ORDER is defined at module scope).
   function getBaseType(name) {
     const c = cards.find(x=>x.name===name)
     if (!c) return 'Other'
@@ -552,9 +791,21 @@ export default function Forge() {
     <>
       <style>{globalCSS}</style>
       {artPickerCard && (
-        <ArtPicker name={artPickerCard} current={overrides[artPickerCard]}
-          onPick={art => { setArtOverride(artPickerCard, art); setOverrides(loadArtOverrides()); setArtPickerCard(null) }}
-          onReset={() => { clearArtOverride(artPickerCard); setOverrides(loadArtOverrides()); setArtPickerCard(null) }}
+        <ArtPicker name={artPickerCard.name} deckMode={deckView}
+          current={deckView ? artPickerCard.art : overrides[artPickerCard.name]}
+          onPick={(art, addMode) => {
+            const nm = artPickerCard.name
+            if (!deckView) { setArtOverride(nm, art); setOverrides(loadArtOverrides()) }        // catalog: global default
+            else if (addMode) { addDeckArtCopy(nm, art) }                                        // deck: add a new copy with this art
+            else { setGroupArt(nm, artPickerCard.art || {}, artPickerCard.qty || 0, art) }       // deck: re-art just this printing
+            setArtPickerCard(null)
+          }}
+          onReset={() => {
+            const nm = artPickerCard.name
+            if (deckView) clearDeckArt(activeDeck, nm)
+            else { clearArtOverride(nm); setOverrides(loadArtOverrides()) }
+            setArtPickerCard(null)
+          }}
           onCount={(name, n) => { if (recordArtCount(name, n)) setArtCounts(loadArtCounts()) }}
           onClose={() => setArtPickerCard(null)} />
       )}
@@ -633,7 +884,7 @@ export default function Forge() {
         <div className="card-grid" style={{flex:1,display:'flex',flexDirection:'column',height:'100vh',maxHeight:'100vh',position:'relative',zIndex:10}}>
           <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 12px 8px'}}>
             <button onClick={()=>nav('/')} style={{...btnStyle,fontSize:10}}>← Home</button>
-            <span style={{color:colors.textMuted,fontSize:12}}>{filtered.length.toLocaleString()} cards</span>
+            <span style={{color:colors.textMuted,fontSize:12}}>{displayList.length.toLocaleString()} cards{deckView ? ` · ${activeDeck}` : ''}</span>
           </div>
           <div ref={setViewport} className="cards-viewport"
             onScroll={e=>setScrollTop(e.currentTarget.scrollTop)}
@@ -641,16 +892,25 @@ export default function Forge() {
             <div style={{height: totalRows * rowH, position:'relative'}}>
               {vp.w > 0 && Array.from({length: Math.max(0, lastRow - firstRow)}, (_, k) => {
                 const row = firstRow + k
-                const items = filtered.slice(row * cols, row * cols + cols)
+                const items = displayList.slice(row * cols, row * cols + cols)
                 return (
                   <div key={row} style={{position:'absolute', top: row * rowH, left:0, right:0, display:'flex', gap:GAP}}>
-                    {items.map(card => (
-                      <CardCell key={card.name} card={card} width={cardW}
-                        count={deck[card.name]} flipped={flippedCards.has(card.name)}
-                        artOverride={overrides[card.name]}
-                        singleArt={artCounts[card.name] === 1}
-                        onAdd={addToDeck} onRemove={removeFromDeck} onFlip={toggleFlip} onArt={setArtPickerCard} />
-                    ))}
+                    {items.map(it => {
+                      // In the deck view, +/- act on the exact printing shown on
+                      // the cell. In catalog browse (or a code-less default cell)
+                      // they just change the count.
+                      const artAdd = deckView && it.art?.set
+                      return (
+                        <CardCell key={it.key} card={it.card} width={cardW}
+                          count={it.qty} flipped={flippedCards.has(it.card.name)}
+                          artOverride={it.art}
+                          singleArt={artCounts[it.card.name] === 1}
+                          onAdd={artAdd ? () => addDeckArtCopy(it.card.name, it.art) : addToDeck}
+                          onRemove={artAdd ? () => removeDeckArtCopy(it.card.name, it.art) : removeFromDeck}
+                          onFlip={toggleFlip}
+                          onArt={() => setArtPickerCard(deckView ? { name: it.card.name, art: it.art, qty: it.qty } : { name: it.card.name })} />
+                      )
+                    })}
                   </div>
                 )
               })}
@@ -675,53 +935,38 @@ export default function Forge() {
               style={{flex:1,padding:'4px 6px',background:'#1e1e24',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:5,fontSize:11,outline:'none'}} />
             <button onClick={createDeck} style={{...btnStyle,fontSize:11}}>+</button>
           </div>
-          <select value={activeDeck} onChange={e=>{setActiveDeck(e.target.value);setConfirmDelete(false)}}
-            style={{padding:'4px',background:'#1e1e24',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:5,fontSize:11}}>
-            {Object.keys(decks).map(d=><option key={d}>{d}</option>)}
-          </select>
+          {renaming ? (
+            <div style={{display:'flex',gap:4}}>
+              <input value={renameVal} onChange={e=>setRenameVal(e.target.value)} autoFocus
+                onKeyDown={e=>{if(e.key==='Enter')commitRename();if(e.key==='Escape')setRenaming(false)}}
+                style={{flex:1,padding:'4px 6px',background:'#1e1e24',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:5,fontSize:11,outline:'none'}} />
+              <button onClick={commitRename} style={{...btnStyle,fontSize:10,color:colors.gold}}>✓</button>
+              <button onClick={()=>setRenaming(false)} style={{...btnStyle,fontSize:10}}>✕</button>
+            </div>
+          ) : (
+            <div style={{display:'flex',gap:4,alignItems:'center'}}>
+              <select value={activeDeck} onChange={e=>{setActiveDeck(e.target.value);setConfirmDelete(false)}}
+                style={{flex:1,padding:'4px',background:'#1e1e24',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:5,fontSize:11}}>
+                {Object.keys(decks).map(d=><option key={d}>{d}</option>)}
+              </select>
+              {activeDeck && (
+                <button onClick={()=>{setRenameVal(activeDeck);setRenaming(true)}} title="Rename deck"
+                  style={{...btnStyle,padding:'4px 7px',display:'flex',alignItems:'center'}}><PencilIcon /></button>
+              )}
+            </div>
+          )}
           {activeDeck && (
             <>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <span style={{fontSize:11,color:colors.textMuted}}>{deckTotal} cards · ${deckCost.toFixed(2)}</span>
-                <Toggle checked={filterDeck === activeDeck} onChange={e => {
-                  if (e.target.checked) {
-                    setFilterDeck(activeDeck)
-                    setSelColors([]); setSelRarities([]); setSelTypes([]); setSearch('')
-                    setCmcRange([0,20]); setPriceRange([0,500]); setStaplesOnly(false); resetScroll()
-                  } else {
-                    setFilterDeck('(all)'); resetScroll()
-                  }
-                }}>Show only</Toggle>
+                <Toggle checked={deckView} onChange={e => {
+                  // Show the deck's actual cards (with per-art duplicates + chosen
+                  // art). Left-panel filters still apply; staples-only is dropped
+                  // so every deck card shows regardless of staple status.
+                  if (e.target.checked) { setDeckView(true); setStaplesOnly(false); resetScroll() }
+                  else { setDeckView(false); resetScroll() }
+                }}>Show deck</Toggle>
               </div>
-              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-                <RenameInline activeDeck={activeDeck} decks={decks} onRename={(oldName,newName)=>{
-                  if (!newName||newName===oldName||decks[newName]) return
-                  setDecks(d=>{const nd={...d};nd[newName]=nd[oldName];delete nd[oldName];saveDecks(nd);return nd})
-                  setActiveDeck(newName)
-                }} />
-                {!confirmDelete
-                  ? <button onClick={deleteDeck} style={{...btnStyle,fontSize:10,color:colors.red,borderColor:'rgba(180,40,40,0.4)'}}>Delete</button>
-                  : <>
-                    <span style={{fontSize:10,color:colors.red,fontFamily:'Cinzel,serif'}}>Sure?</span>
-                    <button onClick={deleteDeck} style={{...btnStyle,fontSize:10,color:colors.red,borderColor:'rgba(180,40,40,0.4)'}}>Yes</button>
-                    <button onClick={()=>setConfirmDelete(false)} style={{...btnStyle,fontSize:10}}>No</button>
-                  </>
-                }
-                <button onClick={()=>setShowImportExport(s=>!s)} style={{...btnStyle,fontSize:10}}>Import/Export</button>
-                {trash.length > 0 && <button onClick={()=>setShowTrash(s=>!s)} style={{...btnStyle,fontSize:10,color:colors.textMuted}}>Trash ({trash.length})</button>}
-              </div>
-
-              {showImportExport && (
-                <div style={{background:'#1a1a20',border:`1px solid ${colors.border}`,borderRadius:6,padding:8}}>
-                  <textarea value={importText} onChange={e=>setImportText(e.target.value)} placeholder={"Paste decklist:\n4 Lightning Bolt\n2 Scalding Tarn\n..."}
-                    style={{width:'100%',height:80,background:'#0d0d0f',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:4,fontSize:10,padding:6,outline:'none',resize:'vertical',fontFamily:'monospace'}} />
-                  <div style={{display:'flex',gap:4,marginTop:4}}>
-                    <button onClick={importDeck} style={{...btnStyle,fontSize:10,color:colors.gold}}>Import</button>
-                    <button onClick={exportDeck} style={{...btnStyle,fontSize:10}}>Copy to Clipboard</button>
-                  </div>
-                </div>
-              )}
-
               {showTrash && trash.length > 0 && (
                 <div style={{background:'#1a1a20',border:`1px solid ${colors.border}`,borderRadius:6,padding:8}}>
                   <div style={{fontSize:9,color:colors.textMuted,fontFamily:'Cinzel,serif',letterSpacing:'1px',marginBottom:6}}>Recently Deleted</div>
@@ -775,20 +1020,57 @@ export default function Forge() {
                 </>
               )}
 
-              <div style={{fontSize:10,color:colors.textMuted,fontFamily:'Cinzel,serif',marginTop:4}}>
-                {TYPE_ORDER.filter(t=>grouped[t]).map(t=>(
-                  <div key={t} style={{marginBottom:6}}>
-                    <div style={{color:colors.gold,marginBottom:2}}>{t} ({grouped[t].reduce((s,x)=>s+x.qty,0)})</div>
-                    {grouped[t].sort((a,b)=>a.name.localeCompare(b.name)).map(({name,qty})=>(
-                      <div key={name} style={{display:'flex',alignItems:'center',gap:4,marginBottom:1}}>
-                        <span style={{flex:1,fontSize:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
-                        <span style={{fontSize:10,color:colors.gold}}>×{qty}</span>
-                        <button onClick={()=>addToDeck(name)} style={{background:'none',border:'none',color:'#4a9a4a',cursor:'pointer',fontSize:12,padding:'0 2px'}}>+</button>
-                        <button onClick={()=>removeFromDeck(name)} style={{background:'none',border:'none',color:'#9a3a3a',cursor:'pointer',fontSize:12,padding:'0 2px'}}>−</button>
+              {/* Deck — card list, or (pencil) an editable text version with art codes */}
+              <div style={{borderTop:`1px solid ${colors.border}`,paddingTop:6}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+                  <div style={{fontSize:9,color:colors.textMuted,fontFamily:'Cinzel,serif',letterSpacing:'1px',textTransform:'uppercase'}}>Deck</div>
+                  <button onClick={()=>{ if(!deckEdit) setDeckText(deckToText()); setDeckEdit(e=>!e) }} title="Edit as text (copy / paste / import)"
+                    style={{...btnStyle,padding:'3px 7px',display:'flex',alignItems:'center',background:deckEdit?'rgba(201,168,76,0.2)':btnStyle.background}}><PencilIcon /></button>
+                </div>
+                {deckEdit ? (
+                  <div>
+                    <textarea value={deckText} onChange={e=>setDeckText(e.target.value)}
+                      style={{width:'100%',height:200,background:'#0d0d0f',border:`1px solid ${colors.border}`,color:colors.text,borderRadius:4,fontSize:10,padding:6,outline:'none',resize:'vertical',fontFamily:'monospace'}} />
+                    <div style={{display:'flex',gap:4,marginTop:6}}>
+                      <button onClick={()=>{applyDeckText(deckText);setDeckEdit(false)}} style={{...btnStyle,fontSize:10,color:colors.gold}}>Apply</button>
+                      <button onClick={()=>navigator.clipboard.writeText(deckText)} style={{...btnStyle,fontSize:10}}>Copy</button>
+                      <button onClick={()=>setDeckEdit(false)} style={{...btnStyle,fontSize:10}}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{fontSize:10,color:colors.textMuted,fontFamily:'Cinzel,serif'}}>
+                    {deckTotal === 0 && <div style={{fontStyle:'italic'}}>Empty — add cards from the grid.</div>}
+                    {TYPE_ORDER.filter(t=>grouped[t]).map(t=>(
+                      <div key={t} style={{marginBottom:6}}>
+                        <div style={{color:colors.gold,marginBottom:2}}>{t} ({grouped[t].reduce((s,x)=>s+x.qty,0)})</div>
+                        {grouped[t].sort((a,b)=>a.name.localeCompare(b.name)).map(({name,qty})=>(
+                          // One row per card (total count). + adds a copy of the
+                          // art with the fewest copies; − removes from the art with
+                          // the most. Per-art splits are managed in the text editor.
+                          <div key={name} style={{display:'flex',alignItems:'center',gap:4,marginBottom:1}}>
+                            <span style={{flex:1,fontSize:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+                            <span style={{fontSize:10,color:colors.gold,minWidth:20,textAlign:'right'}}>×{qty}</span>
+                            <button onClick={()=>addSmallest(name,qty)} style={{background:'none',border:'none',color:'#4a9a4a',cursor:'pointer',fontSize:12,padding:'0 2px'}}>+</button>
+                            <button onClick={()=>removeLargest(name,qty)} style={{background:'none',border:'none',color:'#9a3a3a',cursor:'pointer',fontSize:12,padding:'0 2px'}}>−</button>
+                          </div>
+                        ))}
                       </div>
                     ))}
                   </div>
-                ))}
+                )}
+              </div>
+
+              {/* Bottom actions — delete sits below the card names */}
+              <div style={{borderTop:`1px solid ${colors.border}`,paddingTop:8,display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                {trash.length > 0 && <button onClick={()=>setShowTrash(s=>!s)} style={{...btnStyle,fontSize:10,color:colors.textMuted}}>Trash ({trash.length})</button>}
+                {!confirmDelete
+                  ? <button onClick={deleteDeck} style={{...btnStyle,fontSize:10,color:colors.red,borderColor:'rgba(180,40,40,0.4)',marginLeft:'auto'}}>Delete Deck</button>
+                  : <span style={{marginLeft:'auto',display:'flex',gap:6,alignItems:'center'}}>
+                      <span style={{fontSize:10,color:colors.red,fontFamily:'Cinzel,serif'}}>Sure?</span>
+                      <button onClick={deleteDeck} style={{...btnStyle,fontSize:10,color:colors.red,borderColor:'rgba(180,40,40,0.4)'}}>Yes</button>
+                      <button onClick={()=>setConfirmDelete(false)} style={{...btnStyle,fontSize:10}}>No</button>
+                    </span>
+                }
               </div>
             </>
           )}

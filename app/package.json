@@ -1,6 +1,6 @@
 {
   "name": "mtg_forge_lab_app",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "MTG Lab UI on the Forge engine (via the WebSocket bridge)",
   "author": "MTG Lab",
   "type": "module",

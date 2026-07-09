@@ -17,7 +17,9 @@ export function getArtOverride(name) { return load()[name] || null }
 
 export function setArtOverride(name, art) {
   const m = load()
-  m[name] = { image_url: art.image_url, image_url_back: art.image_url_back || '' }
+  // set + collector are kept so the deck's text view can carry an "art code"
+  // ([set:collector]) that round-trips through copy/paste and import.
+  m[name] = { image_url: art.image_url, image_url_back: art.image_url_back || '', set: art.set || '', collector: art.collector || '' }
   localStorage.setItem(KEY, JSON.stringify(m))
 }
 
@@ -44,6 +46,33 @@ export function recordArtCount(name, n) {
   m[name] = n
   localStorage.setItem(COUNT_KEY, JSON.stringify(m))
   return true
+}
+
+// Cache of each card's DEFAULT printing code { set, collector }, resolved by
+// matching the catalog art URL to a Scryfall printing. Persisted so it only has
+// to be looked up once per card, ever.
+const DEF_CODE_KEY = 'mtg_default_codes'
+export function loadDefaultCodes() { try { return JSON.parse(localStorage.getItem(DEF_CODE_KEY) || '{}') } catch { return {} } }
+function saveDefaultCodes(m) { try { localStorage.setItem(DEF_CODE_KEY, JSON.stringify(m)) } catch {} }
+
+// Resolve (and cache) the set/collector of a card's default printing by matching
+// its catalog image against the card's printings. Falls back to the first print.
+// Returns { set, collector } or null.
+export async function resolveDefaultCode(name, imageUrl) {
+  const cache = loadDefaultCodes()
+  if (cache[name]) return cache[name]
+  const base = u => (u || '').split('?')[0]
+  try {
+    const prints = await fetchPrintings(name)
+    if (!prints || !prints.length) return null
+    const p = prints.find(x => base(x.image_url) === base(imageUrl)) || prints[0]
+    if (p && p.setCode && p.collector) {
+      const code = { set: p.setCode, collector: p.collector }
+      cache[name] = code; saveDefaultCodes(cache)
+      return code
+    }
+  } catch { /* proxy hiccup — try again later */ }
+  return null
 }
 
 // On-demand fetch of every printing's art for a card name, from Scryfall.

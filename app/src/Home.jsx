@@ -18,7 +18,7 @@ export default function Home() {
     <div className="home-bg">
       <div style={{ textAlign: 'center', marginBottom: 8 }}>
         <div style={{ fontSize: 48, marginBottom: 8 }}>⚗</div>
-        <h1 style={{ fontSize: 34, letterSpacing: '6px' }}>MTG FORGE LAB</h1>
+        <h1 style={{ fontSize: 34, letterSpacing: '6px' }}>MTG LAB</h1>
         <p style={{ color: '#7a7060', fontStyle: 'italic', letterSpacing: '2px' }}>
           The Forge engine. Your table.
         </p>

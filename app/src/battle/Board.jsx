@@ -3,6 +3,7 @@ import { cardsIn } from '../game/state.js'
 import { canBlock } from '../game/actions.js'
 import { HumanPlayer } from '../game/player.js'
 import { OrderTriggersUI, OrderBlockersUI, CombatLines } from './CombatUI'
+import InteractionOverlay, { RevealOverlay } from './Interactions.jsx'
 import { fetchTokenImage } from './tokenArt'
 
 const MTG_BACK = 'https://backs.scryfall.io/large/59/b/59b15dba-3a0e-4b44-a34e-4e498e494c7c.jpg?1698702067'
@@ -24,6 +25,9 @@ const T = {
 }
 
 const COMBAT_TITLES = new Set(['declare_attackers', 'declare_blockers', 'order_blockers'])
+// Pending-choice kinds that render as a full-screen modal (so the hover preview
+// must be suppressed — otherwise it floats above and hides the popup).
+const MODAL_TITLES = new Set(['number', 'assign_amount', 'order_list', 'manipulate', 'insert', 'order_blockers', 'order_triggers'])
 
 // ═══ PERSISTENCE ═══
 
@@ -162,11 +166,12 @@ function cardHeightFor(cards, zoneW, zoneH, gap = 3) {
 
 // ═══ BOARD ═══
 
-export default function Board({ gs: gameState, onAction, combatDraft, setCombatDraft, settings, ui, onUiOk, onUiCancel, onUseMana }) {
+export default function Board({ gs: gameState, onAction, combatDraft, setCombatDraft, settings, ui, onUiOk, onUiCancel, onUseMana, onSelectPlayer }) {
   const [selectedCard, setSelectedCard] = useState(null)
   const [zoneViewer, setZoneViewer] = useState(null)
   const [targetCard, setTargetCard] = useState(null)
   const [preview, setPreview] = useState(null)
+  const [revealSeen, setRevealSeen] = useState(null)  // last dismissed reveal key
   const [, forceUpdate] = useState(0)
 
   const [sizes, setSizes] = useState(loadSizes)
@@ -182,6 +187,7 @@ export default function Board({ gs: gameState, onAction, combatDraft, setCombatD
   const draft = combatDraft || { attack: {}, block: {}, order: {}, selected: null }
 
   if (!gameState?.players) return null
+  const revealKey = gameState._reveal ? `${gameState._reveal.message}:${(gameState._reveal.options || []).length}` : null
   const p1 = gameState.players.p1
   const p2 = gameState.players.p2
   const humanPid = (p1 instanceof HumanPlayer) ? 'p1' : (p2 instanceof HumanPlayer) ? 'p2' : null
@@ -191,6 +197,10 @@ export default function Board({ gs: gameState, onAction, combatDraft, setCombatD
   // Forge's InputBlock declare-blockers step (Channel B, no pendingChoice): you
   // click attackers to choose which to block, then your creatures to block it.
   const blockStep = !!gameState._blockStep
+  // A full-screen modal (interaction overlay / reveal / zone viewer) is open.
+  // The hover preview (z-index 10000) is hidden while one is, so it can never
+  // cover a popup and trap you (the reported glitch).
+  const modalOpen = !!(zoneViewer || (gameState._reveal && revealKey !== revealSeen) || (pendingChoice && MODAL_TITLES.has(pendingChoice.title)))
 
   const activePid = gameState.activePlayer
   const defPid = activePid === 'p1' ? 'p2' : 'p1'
@@ -429,11 +439,18 @@ export default function Board({ gs: gameState, onAction, combatDraft, setCombatD
   }
   function isTargetable(card) { return isTargeting && pendingChoice.filter && pendingChoice.filter(card) }
   function isPlayerTargetable(pid) {
-    return isTargeting && pendingChoice.filter && pendingChoice.filter({ isPlayer: true, pid, name: gameState.players[pid].name })
+    if (isTargeting) return pendingChoice.filter && pendingChoice.filter({ isPlayer: true, pid, name: gameState.players[pid].name })
+    // Channel-B targeting: any player is clickable; Forge validates and rejects
+    // an illegal choice (e.g. a hexproof player), flashing rather than erroring.
+    return !!gameState._targeting
   }
   function handlePlayerTargetClick(pid) {
-    if (!isTargeting) return
-    if (isPlayerTargetable(pid)) setTargetCard({ isPlayer: true, pid, name: gameState.players[pid].name })
+    if (isTargeting) { if (isPlayerTargetable(pid)) setTargetCard({ isPlayer: true, pid, name: gameState.players[pid].name }); return }
+    // Channel-B: send the player target straight to Forge (no confirm step, same
+    // as clicking a creature target).
+    if (gameState._targeting && onSelectPlayer) {
+      onSelectPlayer(pid === 'p1' ? gameState._myPlayerId : gameState._oppPlayerId)
+    }
   }
   function handleOptionClick(event) { setSelectedCard(null); onAction({ type: 'action', event }) }
   function handleChoiceClick(option) { if (pendingChoice?.pick) pendingChoice.pick(option) }
@@ -626,7 +643,7 @@ export default function Board({ gs: gameState, onAction, combatDraft, setCombatD
       <OptionsPanel selectedCard={selectedCard} pendingChoice={pendingChoice}
         targetCard={targetCard} humanPid={humanPid} isActive={activePid === humanPid} mulligan={gameState.mulligan}
         mulliganTo={(gameState.maxHandSize || 7) - (gameState.mulliganCount || 0) - 1}
-        blockStep={blockStep}
+        blockStep={blockStep} channelBTargeting={gameState._targeting} targetPrompt={gameState._targetPrompt}
         ui={ui} onUiOk={onUiOk} onUiCancel={onUiCancel}
         onOptionClick={handleOptionClick} onChoiceClick={handleChoiceClick}
         onConfirmBlocks={handleConfirmBlocks} onConfirmAttackers={handleConfirmAttackers}
@@ -660,11 +677,19 @@ export default function Board({ gs: gameState, onAction, combatDraft, setCombatD
         />
       )}
 
+      {/* NUMBER / ASSIGN-AMOUNT / ORDER / MANIPULATE / INSERT interactions */}
+      <InteractionOverlay choice={pendingChoice} />
+
+      {/* REVEALED CARDS (non-blocking; dismissed locally) */}
+      {gameState._reveal && revealKey !== revealSeen && (
+        <RevealOverlay reveal={gameState._reveal} onDismiss={() => setRevealSeen(revealKey)} />
+      )}
+
       {/* COMBAT CONNECTION LINES */}
       <CombatLines boardRef={boardRef} gs={gameState} draft={draft} declMode={declMode} blockStep={blockStep} attackDraft={attackDraft} />
 
-      {/* HOVER CARD PREVIEW */}
-      {preview && (
+      {/* HOVER CARD PREVIEW (hidden while a modal is open so it can't cover it) */}
+      {preview && !modalOpen && (
         <img src={preview.url} alt="" draggable={false} style={{
           position: 'fixed', left: preview.x, top: preview.y, width: 230,
           borderRadius: 10, zIndex: 10000, pointerEvents: 'none',
@@ -809,9 +834,10 @@ function CardImg({ card, h = 70, border = T.goldDim, onPreview, onPreviewEnd }) 
 
 // ═══ OPTIONS PANEL ═══
 
-const OVERLAY_CHOICES = new Set(['select_target', 'declare_attackers', 'declare_blockers', 'order_blockers', 'order_triggers'])
+const OVERLAY_CHOICES = new Set(['select_target', 'declare_attackers', 'declare_blockers', 'order_blockers', 'order_triggers',
+  'number', 'assign_amount', 'order_list', 'manipulate', 'insert'])
 
-function OptionsPanel({ selectedCard, pendingChoice, targetCard, humanPid, isActive, mulligan, mulliganTo, blockStep, ui, onUiOk, onUiCancel, onOptionClick, onChoiceClick, onConfirmBlocks, onConfirmAttackers, onTargetConfirm, onTargetSkip }) {
+function OptionsPanel({ selectedCard, pendingChoice, targetCard, humanPid, isActive, mulligan, mulliganTo, blockStep, channelBTargeting, targetPrompt, ui, onUiOk, onUiCancel, onOptionClick, onChoiceClick, onConfirmBlocks, onConfirmAttackers, onTargetConfirm, onTargetSkip }) {
   const title = pendingChoice?.title
   const isTargeting = title === 'select_target'
   const combatDecl = title === 'declare_attackers' || title === 'declare_blockers' || title === 'order_blockers'
@@ -928,6 +954,23 @@ function OptionsPanel({ selectedCard, pendingChoice, targetCard, humanPid, isAct
         </div>
       </div>
     )
+  } else if (channelBTargeting) {
+    // Forge InputSelectTargets ("any target" etc.): highlighted cards + players
+    // are clickable; OK confirms once enough targets are chosen, Cancel aborts.
+    content = (
+      <div>
+        <div style={{ fontSize: 9, color: T.red, fontFamily: 'Cinzel,serif', letterSpacing: 1, marginBottom: 6 }}>
+          🎯 <ManaText text={targetPrompt || 'Choose a target'} />
+        </div>
+        <div style={{ fontSize: 10, color: T.textMuted, marginBottom: 6, fontStyle: 'italic' }}>
+          Click a highlighted target — a permanent, or a player's bar for "any target".
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {ui.ok && <button onClick={e => { e.stopPropagation(); onUiOk && onUiOk() }} style={{ ...btnElegant, borderColor: T.red, color: T.red }}>{ui.okLabel && !/^ok$/i.test(ui.okLabel) ? ui.okLabel : 'Done'}</button>}
+          {ui.cancel && <button onClick={e => { e.stopPropagation(); onUiCancel && onUiCancel() }} style={btnElegant}>{ui.cancelLabel || 'Cancel'}</button>}
+        </div>
+      </div>
+    )
   } else if (isPriority && !selectedCard) {
     const canUndo = /undo/i.test(ui.cancelLabel || '')
     content = (
@@ -992,6 +1035,10 @@ function OptionsPanel({ selectedCard, pendingChoice, targetCard, humanPid, isAct
 // ═══ ZONE VIEWER MODAL ═══
 
 function ZoneViewerModal({ zone, pid, gs: gameState, filter, onPick, onClose }) {
+  const isLibrary = zone === 'library'
+  // Two library views: grouped-by-name (default, order hidden) and an ordered
+  // top→bottom list (Arena-style) for when an effect lets you see library order.
+  const [ordered, setOrdered] = useState(false)
   let cards = [], title = ''
   if (zone === 'library') {
     // Show the owner's known library contents (grouped + counts; order never
@@ -1030,13 +1077,33 @@ function ZoneViewerModal({ zone, pid, gs: gameState, filter, onPick, onClose }) 
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, paddingBottom: 8, borderBottom: `1px solid ${T.gold}30` }}>
           <span style={{ fontSize: 14, color: T.gold, fontFamily: 'Cinzel,serif', letterSpacing: 1.5 }}>{title} <span style={{ color: T.textMuted, fontSize: 11 }}>({shown})</span></span>
-          <button onClick={onClose} style={{ ...btnElegant, padding: '3px 10px' }}>✕</button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {isLibrary && (
+              <div style={{ display: 'flex', gap: 4 }}>
+                {[['Grouped', false], ['Order', true]].map(([lbl, val]) => (
+                  <button key={lbl} onClick={() => setOrdered(val)} style={{
+                    fontSize: 9, padding: '3px 9px', borderRadius: 4, cursor: 'pointer', fontFamily: 'Cinzel,serif', letterSpacing: 0.5,
+                    background: ordered === val ? 'rgba(212,168,67,0.22)' : 'rgba(255,255,255,0.03)',
+                    border: `1px solid ${ordered === val ? T.gold : T.gold + '30'}`, color: ordered === val ? T.gold : T.textMuted,
+                  }}>{lbl}</button>
+                ))}
+              </div>
+            )}
+            <button onClick={onClose} style={{ ...btnElegant, padding: '3px 10px' }}>✕</button>
+          </div>
         </div>
         {anyTargetable && (
           <div style={{ fontSize: 9, color: T.gold, fontFamily: 'Cinzel,serif', marginBottom: 10 }}>🎯 Click a highlighted card to select it</div>
         )}
-        {entries.length === 0 ? (
+        {(ordered && isLibrary ? cards.length === 0 : entries.length === 0) ? (
           <div style={{ color: T.textMuted, fontSize: 11, fontStyle: 'italic', textAlign: 'center', padding: 20 }}>Empty</div>
+        ) : ordered && isLibrary ? (
+          // Arena-style: cards face-down in true shuffled order, scrub with a
+          // slider; a card shows its face only if the engine reveals it. Uses the
+          // explicit ordered uid list (object key order isn't reliable).
+          <LibraryFlipper
+            cards={(gameState._libOrderUids || []).map(u => gameState.cards[u]).filter(c => c && c.pid === pid && c.zone === 'library')}
+            filter={filter} onPick={onPick} />
         ) : (
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {entries.map(({ card, count }) => {
@@ -1050,6 +1117,39 @@ function ZoneViewerModal({ zone, pid, gs: gameState, filter, onPick, onClose }) 
             })}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ═══ LIBRARY FLIPPER (Arena-style ordered browse) ═══
+// The library is shown in true shuffled order, every card face-down, and you
+// scrub through it with a slider (simulating flipping through the deck). A card
+// only shows its face when the engine says it's revealed (card._libVisible),
+// e.g. an effect that lets you play with the top card revealed.
+function LibraryFlipper({ cards, filter, onPick }) {
+  const [idx, setIdx] = useState(0)
+  const n = cards.length
+  const i = Math.min(idx, n - 1)
+  const card = cards[i]
+  if (!card) return null
+  const visible = !!card._libVisible
+  const targetable = !!filter && filter(card)
+  const pos = i === 0 ? 'TOP' : i === n - 1 ? 'BOTTOM' : ''
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '6px 0' }}>
+      <div style={{ fontSize: 10, color: T.gold, fontFamily: 'Cinzel,serif', letterSpacing: 1 }}>
+        {pos && <span style={{ color: T.goldBr, marginRight: 6 }}>{pos}</span>}Card {i + 1} of {n}
+      </div>
+      <img src={(visible ? card.imageUrl : null) || MTG_BACK} alt={visible ? card.name : 'Hidden card'} draggable={false}
+        onClick={targetable ? () => onPick(card) : undefined}
+        style={{ width: 230, borderRadius: 12, cursor: targetable ? 'pointer' : 'default', border: `2px solid ${targetable ? T.gold : visible ? T.goldDim : '#2a2a30'}`, boxShadow: visible ? `0 0 16px ${T.gold}40` : '0 6px 24px rgba(0,0,0,0.8)' }} />
+      <div style={{ fontSize: 12, color: visible ? T.goldBr : T.textMuted, fontFamily: 'Cinzel,serif' }}>{visible ? card.name : 'Face down'}</div>
+      <input type="range" min={0} max={Math.max(0, n - 1)} value={i} onChange={e => setIdx(parseInt(e.target.value))}
+        style={{ width: '80%', accentColor: T.gold }} />
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button onClick={() => setIdx(x => Math.max(0, x - 1))} style={{ ...btnElegant, opacity: i === 0 ? 0.4 : 1 }}>◀ Up</button>
+        <button onClick={() => setIdx(x => Math.min(n - 1, x + 1))} style={{ ...btnElegant, opacity: i === n - 1 ? 0.4 : 1 }}>Down ▶</button>
       </div>
     </div>
   )

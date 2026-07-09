@@ -404,6 +404,17 @@ public final class BridgeMain {
             final String action = str(m, "action");
             if ("sim".equals(action)) { handleSim(m, server); return; }
             if ("simCancel".equals(action)) { simCancel = true; return; }
+            if ("stops".equals(action)) {
+                // Arena-style per-step stops for this seat (see BridgeGui).
+                int seat = server.seatOf(conn);
+                if (seat >= 0) {
+                    java.util.Set<String> set = new java.util.HashSet<>();
+                    if (m.has("stops") && m.get("stops").isJsonArray())
+                        for (JsonElement el : m.getAsJsonArray("stops")) set.add(el.getAsString());
+                    BridgeGui.setStops(seat, set);
+                }
+                return;
+            }
             if ("deck".equals(action)) {
                 // A seat announced its chosen deck (WLAN lobby). Store it for `start`.
                 int seat = server.seatOf(conn);
@@ -431,10 +442,13 @@ public final class BridgeMain {
             Deck d1 = buildDeck(deck1);
 
             List<RegisteredPlayer> players = new ArrayList<>();
+            // The human's chosen username (from the client profile); the AI is
+            // simply "AI". Names flow into player bars and every Forge log line.
+            final String you = str(m, "you").isEmpty() ? "You" : str(m, "you");
             RegisteredPlayer rp0 = new RegisteredPlayer(d0);
             // "ai2" = AI vs AI (you spectate seat 0). Otherwise seat 0 is you.
             if ("ai2".equalsIgnoreCase(gmode)) rp0.setPlayer(GamePlayerUtil.createAiPlayer("AI 1", 0));
-            else rp0.setPlayer(new LobbyPlayerHuman("You"));
+            else rp0.setPlayer(new LobbyPlayerHuman(you));
             players.add(rp0);
             RegisteredPlayer rp1 = new RegisteredPlayer(d1);
             if ("pvp".equalsIgnoreCase(gmode)) {

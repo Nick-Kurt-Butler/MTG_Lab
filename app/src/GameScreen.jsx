@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { connectBridge } from './engine/bridge.js'
 import ForgeBattle from './battle/ForgeBattle.jsx'
+import { loadUsername } from './profile.js'
 
 // One setup screen for every matchup. The in-game UI (ForgeBattle) is identical
 // for any seat — human or AI — so WLAN human-vs-human reuses it exactly; only
@@ -31,7 +32,7 @@ function loadDecks() {
 }
 const deckCount = cards => Object.values(cards || {}).reduce((a, b) => a + b, 0)
 
-const EMPTY_UI = { message: '', ok: false, cancel: false, okLabel: 'OK', cancelLabel: 'Cancel', focusOk: false, mulligan: false, mulliganCount: 0, maxHandSize: 7, hasActions: true, selectables: [], weakly: [], highlighted: [], selInfo: [], weakInfo: [] }
+const EMPTY_UI = { message: '', ok: false, cancel: false, okLabel: 'OK', cancelLabel: 'Cancel', focusOk: false, mulligan: false, mulliganCount: 0, maxHandSize: 7, hasActions: true, selectables: [], weakly: [], highlighted: [], selInfo: [], weakInfo: [], reveal: null }
 
 export default function GameScreen({ wlan }) {
   const nav = useNavigate()
@@ -66,7 +67,7 @@ export default function GameScreen({ wlan }) {
     setUi(prev => {
       switch (msg.kind) {
         case 'message': return { ...prev, message: msg.message || '' }
-        case 'reveal':  return { ...prev, message: msg.message || prev.message }
+        case 'reveal':  return { ...prev, message: msg.message || prev.message, reveal: { message: msg.message || 'Revealed', options: msg.options || [] } }
         case 'buttons': return { ...prev, ok: !!msg.ok, cancel: !!msg.cancel,
           okLabel: msg.okLabel || 'OK', cancelLabel: msg.cancelLabel || 'Cancel', focusOk: !!msg.focusOk, mulligan: !!msg.mulligan,
           mulliganCount: msg.mulliganCount ?? prev.mulliganCount, maxHandSize: msg.maxHandSize ?? prev.maxHandSize,
@@ -115,7 +116,7 @@ export default function GameScreen({ wlan }) {
   function beginLocal(mode) {
     if (!yourDeck) return
     deckOnWelcomeRef.current = null
-    startPayloadRef.current = { type: 'control', action: 'start', mode, decks: [deckObj(yourDeck), deckObj(oppDeck)] }
+    startPayloadRef.current = { type: 'control', action: 'start', mode, decks: [deckObj(yourDeck), deckObj(oppDeck)], you: loadUsername() }
     autoStartRef.current = true
     prepConn(); setWlanRole(null); setStep('lobby'); open('ws://127.0.0.1:8088')
   }
@@ -123,7 +124,7 @@ export default function GameScreen({ wlan }) {
   function hostWlan() {
     if (!yourDeck) return
     deckOnWelcomeRef.current = deckObj(yourDeck)
-    startPayloadRef.current = { type: 'control', action: 'start', mode: 'pvp', decks: [deckObj(yourDeck)] }
+    startPayloadRef.current = { type: 'control', action: 'start', mode: 'pvp', decks: [deckObj(yourDeck)], you: loadUsername() }
     autoStartRef.current = false
     prepConn(); setWlanRole('host'); setStep('lobby'); open('ws://127.0.0.1:8088')
   }
@@ -140,11 +141,12 @@ export default function GameScreen({ wlan }) {
 
   const respond = useCallback((id, data) => { connRef.current?.respond(id, data); setPrompt(null) }, [])
   const action = useCallback((kind, fields) => { connRef.current?.action(kind, fields) }, [])
+  const sendControl = useCallback(obj => { connRef.current?.send(obj) }, [])
   function leave() { unmountedRef.current = true; connRef.current?.close(); nav('/') }
   function backToSetup() { unmountedRef.current = true; connRef.current?.close(); setStep('setup'); setStatus('idle'); setSnapshot(null); setUi(EMPTY_UI); setLobby({ filled: [], ip: null, deckNames: [] }) }
 
   if (step === 'playing' && snapshot) {
-    return <ForgeBattle snapshot={snapshot} ui={ui} prompt={prompt} respond={respond} action={action} mySeat={mySeat} onExit={leave} />
+    return <ForgeBattle snapshot={snapshot} ui={ui} prompt={prompt} respond={respond} action={action} sendControl={sendControl} mySeat={mySeat} onExit={leave} />
   }
   return <Setup {...{ wlan, names, decks, yourDeck, setYourDeck, oppDeck, setOppDeck, hostIp, setHostIp,
     step, wlanRole, status, lobby, beginLocal, hostWlan, hostStart, joinWlan, nav, backToSetup }} />

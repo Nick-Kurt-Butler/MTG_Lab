@@ -228,25 +228,56 @@ let windowOpened = false
 
 function spawnBridge() {
   if (process.env.FORGE_NO_SPAWN || bridge) return
-  if (!fs.existsSync(cfg.jar)) {
+  // Log every resolved path up front. When the packaged app "can't reach the
+  // engine", the cause is almost always one of these being wrong/unusable, and
+  // this makes it obvious in the terminal instead of a silent 60s timeout.
+  console.log('[electron] bridge config:',
+    JSON.stringify({ java: cfg.java, jar: cfg.jar, forgeGui: cfg.forgeGui, port: cfg.port, mode: cfg.mode, resourcesPath: RES }))
+  for (const [label, p] of [['jar', cfg.jar], ['forgeGui', cfg.forgeGui], ['deckA', cfg.deckA], ['deckB', cfg.deckB]]) {
+    if (!p || !fs.existsSync(p)) console.error(`[electron] MISSING ${label}:`, p)
+  }
+  if (!cfg.jar || !fs.existsSync(cfg.jar)) {
     console.error('[electron] bridge jar not found:', cfg.jar, '— build it with `mvn -q package` in bridge/')
     return
   }
+  // Verify the Java we're about to launch actually runs. On Linux the bundled
+  // JRE can land in a noexec mount or lose its +x bit, so `spawn` fails with
+  // EACCES/ENOENT — check now and fall back to system java rather than dying.
+  if (!javaRuns(cfg.java)) {
+    console.error('[electron] bundled/first java not runnable:', cfg.java, '— trying system java')
+    if (javaRuns(javaExe)) { cfg.java = javaExe }
+    else { console.error('[electron] no working java found (need Java 21). Bridge cannot start.'); return }
+  }
   // Free the port first: a leftover bridge from a previous run would otherwise
   // keep serving stale code while this fresh jar fails to bind (a recurring
-  // "my changes didn't take effect" trap).
+  // "my changes didn't take effect" trap). lsof may be absent on minimal Linux
+  // installs — that's fine, the fresh bridge just binds the (already free) port.
   try {
     const out = execSync(`lsof -ti tcp:${cfg.port} || true`, { encoding: 'utf8' }).trim()
     if (out) {
       console.log('[electron] freeing stale bridge on port', cfg.port, '(pids', out.replace(/\n/g, ',') + ')')
       execSync(`lsof -ti tcp:${cfg.port} | xargs kill -9 || true`)
     }
-  } catch (e) { /* best effort */ }
-  console.log('[electron] starting bridge:', cfg.jar, cfg.mode)
-  bridge = spawn(cfg.java, ['-jar', cfg.jar, cfg.forgeGui, cfg.deckA, cfg.deckB, cfg.port, cfg.mode])
-  bridge.stdout.on('data', d => process.stdout.write('[bridge] ' + d))
-  bridge.stderr.on('data', d => process.stderr.write('[bridge] ' + d))
-  bridge.on('exit', code => { console.log('[electron] bridge exited', code); bridge = null })
+  } catch (e) { /* lsof missing / nothing to free — best effort */ }
+  console.log('[electron] starting bridge:', cfg.java, '-jar', cfg.jar, cfg.mode)
+  try {
+    bridge = spawn(cfg.java, ['-jar', cfg.jar, cfg.forgeGui, cfg.deckA, cfg.deckB, cfg.port, cfg.mode])
+  } catch (e) {
+    console.error('[electron] failed to spawn bridge:', e.message); bridge = null; return
+  }
+  // Without this handler an async spawn failure (EACCES/ENOENT) becomes an
+  // uncaught exception; here we just log it and leave the app usable.
+  bridge.on('error', e => { console.error('[electron] bridge process error:', e.message); bridge = null })
+  bridge.stdout?.on('data', d => process.stdout.write('[bridge] ' + d))
+  bridge.stderr?.on('data', d => process.stderr.write('[bridge] ' + d))
+  bridge.on('exit', (code, signal) => { console.log('[electron] bridge exited code=' + code, 'signal=' + signal); bridge = null })
+}
+
+// Quick "does this java binary actually execute" probe (java -version exits 0).
+function javaRuns(bin) {
+  if (!bin) return false
+  try { execSync(`"${bin}" -version`, { stdio: 'ignore' }); return true }
+  catch { return false }
 }
 
 function createWindow() {
@@ -268,7 +299,9 @@ function createWindow() {
 
   // Surface renderer-side problems in the same terminal as the bridge logs.
   // The battle UI is the tricky part, so make crashes loud instead of a black screen.
-  if (!process.env.FORGE_NO_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' })
+  // DevTools only in development (unpackaged). In a packaged/production build the
+  // detached DevTools window must never pop up.
+  if (!app.isPackaged && !process.env.FORGE_NO_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' })
   const LEVELS = ['log', 'info', 'WARN', 'ERROR']
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level >= 2) console.error(`[renderer:${LEVELS[level] || level}] ${message}  (${sourceId}:${line})`)
